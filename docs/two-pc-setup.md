@@ -84,3 +84,16 @@ python tools/certificate.py --ip 192.168.1.115 --output certs-bazaar
 Replace the IP with the newly assigned address. Stop the running server before starting it again.
 
 See [Operations](operations.md) for daily use, external backups, restore, and recovery of an unavailable laptop.
+
+## If installation says Python was not found
+
+That message means Windows could not start a Python runtime; it can be a missing installation or a PATH/Store-alias conflict. Disabling the Store alias by itself does not install Python.
+
+1. Install Python from the [official Windows downloads](https://www.python.org/downloads/windows/). This POS is tested with Python 3.13.
+2. If using Python Install Manager, open a new terminal after installing it and run `py install 3.13` to install the runtime. If using a traditional Python installer, select **Add python.exe to PATH**.
+3. Close and reopen the terminal. Check `py -3.13 --version` or `python --version`.
+4. Run `Install-POS.cmd` again on the main laptop.
+
+The updated installation/start commands check a working `python` first, then the `py` launcher, and show a specific Python setup message when neither works. The second laptop only needs Python if using the local print helper. Keep the existing `data` folder when updating application files.
+
+Official reference: [Python on Windows](https://docs.python.org/3/using/windows.html).
