@@ -81,6 +81,7 @@ class POSTest(unittest.TestCase):
             self.assertEqual(self.scalar(f'SELECT COUNT(*) FROM {table}'),1)
         self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
         receipt=self.client.get('/api/sales/'+str(first['sale_id'])).json
+        self.assertEqual(receipt['sale']['receipt_number'],'SQI-001-000001')
         self.assertEqual(receipt['payment']['change_minor'],7450)
 
     def test_concurrent_duplicate_requests(self):

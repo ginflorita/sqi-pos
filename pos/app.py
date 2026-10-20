@@ -743,7 +743,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 require(line['active'] and line['quantity_on_hand'] >= line['quantity'], f'Insufficient stock or inactive item: {line["description"]}.', 409)
             stamp = now()
             # The ticket ID is globally unique, so the receipt cannot collide across days.
-            number = f'BZ-{ticket["bazaar_day_id"]:03d}-{tid:06d}'
+            number = f'SQI-{ticket["bazaar_day_id"]:03d}-{tid:06d}'
             sid = db().execute('''INSERT INTO sales(purchase_ticket_id,receipt_number,bazaar_day_id,shift_id,cashier_user_id,terminal_id,subtotal_minor,total_minor,completed_at)
                 VALUES(?,?,?,?,?,?,?,?,?)''', (tid,number,s['bazaar_day_id'],s['shift_id'],g.user['user_id'],g.terminal['terminal_id'],q['total_minor'],q['total_minor'],stamp)).lastrowid
             for l in q['lines']:

@@ -53,6 +53,8 @@ Receipts and their print/PDF layout show the supplied SQI logo at the top, with 
 
 The logo is bundled at `static/sqi-logo.png`, so displaying or printing it needs no connection to the source network share or internet. The same receipt layout is used when viewing saved receipts and requesting a print/PDF copy. Printing waits for the logo image to decode. Check the final paper layout on the actual receipt printer.
 
+Receipt numbers use the `SQI` prefix, for example `SQI-001-000009`. Existing `BZ` numbers are displayed with the `SQI` prefix on receipts, transaction lists, duplicate warnings, and correction forms, preserving their numeric suffix. Original historical identifiers remain stored unchanged; new sales store the `SQI` number directly.
+
 ### Orders and corrections
 
 Transfer orders using the icon beside the ticket number. The receiving cashier needs an open same-day shift and no current order, then refreshes their counter. Only the current owner and laptop can confirm payment.

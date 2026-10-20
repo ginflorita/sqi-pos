@@ -64,6 +64,10 @@ The logo header and compact company footer are inside the same receipt content u
 
 ![SQI receipt totals and office hours](screenshots/sqi-receipt-footer.png)
 
+Receipt-prefix verification: the two focused checkout tests (`one_sale_on_double` and `concurrent_duplicate`) passed in 3.127 seconds, including an assertion that a new sale stores `SQI-001-000001`. The demo transaction list and saved receipt `SQI-001-000009` displayed the new prefix for an existing stored `BZ` number. The numeric suffix and historical database records were preserved. JavaScript syntax and whitespace checks passed.
+
+![Receipt with the SQI prefix](screenshots/sqi-receipt-number.png)
+
 The direct-print update passed two focused regression tests in 2.814 seconds (`python -m unittest discover -s tests -k print -k cashier_roles -v`), plus JavaScript syntax and whitespace checks. In the demo browser, clicking **Print / save PDF** skipped the former reason form and recorded `receipt.print_requested` with `Customer copy` and actor/terminal attribution. The receipt remained visible after the print request. No physical printing was performed; printer output remains an equipment check.
 
 ![Receipt after a direct print request without a reason form](screenshots/direct-print.png)
