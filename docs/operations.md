@@ -49,7 +49,7 @@ Use one ticket per physical customer purchase. One ticket can produce only one s
 
 ### Acknowledgement receipt branding
 
-Receipts and their print/PDF layout show the supplied SQI logo at the top, with **SQI Group Int'l. Corp - Philippines** directly beneath it. A compact footer below the totals shows head office **18 Pineapple Rd, Malabon, 1475 Metro Manila, Philippines**, followed by two aligned columns: telephone **8-364-7561** beside **Website: https://sqigroup.ph**, then **Office Hours: 9:00 AM – 6:00 PM** beside **Monday – Saturday**. The bazaar name, receipt number, day, cashier, items, totals, cash, and change remain on each receipt.
+Receipts and their print/PDF layout show the supplied SQI logo at the top, with **SQI Group Int'l. Corp - Philippines** directly beneath it. A compact footer below the totals shows head office **18 Pineapple Rd, Malabon, 1475 Metro Manila, Philippines**, followed by two aligned columns: telephone **8-364-7561** beside **Website: https://sqigroup.ph**, then **Office Hours: 9:00 AM – 6:00 PM** beside **Monday – Saturday**. The receipt number sits directly below ACKNOWLEDGEMENT RECEIPT, without the extra bazaar/name line. Receipt details show one business date (without Day 1 or a repeated timestamp), cashier, items, totals, cash, and change. The head office address is left-aligned with the footer columns.
 
 The logo is bundled at `static/sqi-logo.png`, so displaying or printing it needs no connection to the source network share or internet. The same receipt layout is used when viewing saved receipts and requesting a print/PDF copy. Printing waits for the logo image to decode. Check the final paper layout on the actual receipt printer.
 
