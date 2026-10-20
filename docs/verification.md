@@ -40,6 +40,10 @@ On 2026-10-20, enlarged and prioritized **Current order**. At the checked laptop
 
 ![Larger Current order panel and payment controls](screenshots/larger-current-order.png)
 
+The checkout heading now uses one compact row for **The counter**, its subtitle, and **Refresh stock**. The redundant eyebrow above the title was removed on Checkout. Browser measurement confirmed a 44 px row with all three elements vertically centered. The subtitle truncates when space is limited and is hidden on narrow screens to keep the title and refresh action on one row. JavaScript syntax and whitespace checks passed; this layout check only viewed the existing demo ticket.
+
+![Compact single-row checkout heading](screenshots/compact-checkout-heading.png)
+
 On 2026-10-20, checked the simplified product forms in the separate demo workspace. Creating a product shows no reason or password field. Editing a product shows no password field; changing its selling price reveals the required reason field, and restoring the original price hides and disables that field. No sample price changes were saved during this check.
 
 ![Product editing without repeated password confirmation](screenshots/product-form.png)
