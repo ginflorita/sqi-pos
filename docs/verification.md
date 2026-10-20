@@ -56,7 +56,7 @@ Also checked the stock movement form: **Stock in** and **Opening stock** label t
 
 ![Stock-in with an optional reason](screenshots/stock-reason.png)
 
-On 2026-10-20, checked SQI receipt branding against saved demo receipt `BZ-001-000010`. The supplied local PNG loaded at its original 5442 × 3064 resolution and displayed at 150 px wide. Verified the company name, full head office address, telephone, website link, office hours, and existing receipt/payment details. The dialog opens at the logo; the company details now appear in a compact footer below the totals. Verified the visible label `Website: https://sqigroup.ph` and its HTTPS destination. The production host served the logo successfully with HTTP 200. JavaScript syntax and whitespace checks passed. These presentation changes did not rerun the 27-test integration suite recorded above.
+On 2026-10-20, checked SQI receipt branding against saved demo receipt `BZ-001-000010`. The supplied local PNG loaded at its original 5442 × 3064 resolution and displayed at 150 px wide. Verified the company name directly below the logo, full head office address in the footer, and a two-column footer grid: telephone / website on row one and office hours / Monday–Saturday on row two. The dialog opens at the logo. Verified the visible label `Website: https://sqigroup.ph` and its HTTPS destination. The production host served the logo successfully with HTTP 200. JavaScript syntax and whitespace checks passed. These presentation changes did not rerun the 27-test integration suite recorded above.
 
 The logo header and compact company footer are inside the same receipt content used by the existing 80 mm print stylesheet. Actual printer/PDF pagination remains an equipment check.
 
