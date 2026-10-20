@@ -61,6 +61,8 @@ After a lost payment response, keep the same browser and ticket. Refresh when co
 
 Managers can open original receipts in Transactions to return items or void the full sale, with password confirmation and a reason. Returned quantity cannot exceed the remaining sold amount. Voids are unavailable after partial returns. Restocking is explicit; damaged goods can have zero restock. Refunds use the original price and the current day's shift. Record a documented cash-in if that drawer has insufficient expected cash. Cash in/out does not count as sales.
 
+The return form automatically shows each item's refund and **Refund to customer** as quantities change: return quantity × original selling price, summed across selected items. Restock quantity only changes inventory and does not change the refund. Invalid or excessive return quantities show a validation message instead of a misleading total. Review the amount before **Record correction**; the server calculates and validates the saved refund, and the cashier physically gives the cash to the customer.
+
 If a cashier's laptop is unavailable, the manager can use **Cashier shifts → Manager close** from an approved laptop. Count the physical drawer, record a reason, and confirm the manager password. If the shift has an unpaid order, review its items and explicitly confirm cancellation; a changed order requires a fresh review. The server serializes closure against checkout and records both cancellation and closure in the audit. This allows a lost-laptop shift to be reconciled without rewriting its sales.
 
 ## Backups

@@ -14,7 +14,7 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
 | Accounts | Named managers/cashiers, laptop approval, password confirmation for sensitive changes, and expiring sessions |
 | Bazaar days | Day 1, Day 2, etc., cashier shifts, opening/closing cash counts, and cash variance |
-| Corrections | Manager-approved returns/voids, explicit restocking, and cash in/out |
+| Corrections | Manager-approved returns/voids, live refund calculation from original sale prices, explicit restocking, and cash in/out |
 | Reports | Business-date span, day, product, category, cashier, and laptop filters, with Excel-compatible CSV exports |
 | Audit and recovery | Append-only audit events, verified database backups, and restore into a new folder |
 

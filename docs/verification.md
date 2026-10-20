@@ -56,6 +56,10 @@ The direct-print update passed two focused regression tests in 2.814 seconds (`p
 
 ![Receipt after a direct print request without a reason form](screenshots/direct-print.png)
 
+The return form now displays a live refund per item and total using the original sale prices. Browser verification on demo receipt `BZ-001-000010` confirmed return qty 0 → ₱0.00, return qty 1 → ₱150.00, and restock qty 0 or 1 → the same ₱150.00 refund. Return qty 2, exceeding the one remaining item, showed a validation message and no monetary total. JavaScript syntax and whitespace checks passed. No correction was posted during this check; backend refund calculation was unchanged.
+
+![Live refund amount with return qty one and restock qty zero](screenshots/refund-preview.png)
+
 On 2026-10-20, a dedicated demo server deliberately replaced one successful checkout response with HTTP 503 **after the sale committed**. The browser displayed the failure and retained its payment request. Reloading automatically recovered receipt `BZ-001-000010`: total 150.00, paid 200.00, change 50.00. Database verification found exactly one sale, one payment, and one stock deduction for that ticket. The same session also verified manager closure of the previous demo drawer and opening a replacement-browser shift.
 
 This simulates an uncertain response after commit; it does not replace a physical Wi-Fi-disconnection or power-loss test. The fault-injection helper is `tests/preview_server.py`, restricted to the `.demo/` workspace and loopback. It is not used by `run.py`.
