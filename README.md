@@ -20,14 +20,23 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 
 ## Requirements
 
-- **Main PC:** Windows, Python 3.11 or later available as `python`, and a browser.
-- **Second PC:** A browser connected to the same router as the main PC.
+- **Main PC:** Windows, Python 3.11 or later available through `python` or `py`, and a browser. Tested with Python 3.13.
+- **Second PC:** A browser connected to the same router as the main PC; Python and its printer driver are also needed for the optional local USB print helper. No second database or POS server.
 - **Network:** Private Wi-Fi or Ethernet; LAN mode uses HTTPS.
 - **Storage:** Keep the live database on the main PC's internal drive and configure a separate backup destination.
 
 ## Install and start on the main PC
 
-Clone the repository, or download and extract its source. In PowerShell, open the project folder and run:
+**Install Python first.** Install [Python Install Manager](https://www.python.org/downloads/windows/), open a new terminal, then run:
+
+```powershell
+py install 3.13
+py -3.13 --version
+```
+
+For a traditional Python installer, enable **Add python.exe to PATH** instead. If installation says “Python was not found,” see the [troubleshooting instructions](docs/two-pc-setup.md#if-installation-says-python-was-not-found). Disabling the Microsoft Store shortcut alone does not install Python.
+
+Then clone the repository, or use **Code → Download ZIP** on GitHub and extract the source. Git is only needed for the clone option. In PowerShell, open the project folder and run:
 
 ```powershell
 git clone https://github.com/ginflorita/sqi-pos.git
@@ -36,7 +45,9 @@ cd sqi-pos
 .\Start-POS.cmd
 ```
 
-If you already downloaded or cloned the project, start with `Install-POS.cmd` in its folder. Installation creates a `.venv` environment and downloads the dependencies. After installation, use `Start-POS.cmd` whenever starting the host.
+If you downloaded a ZIP, skip the `git clone` and `cd sqi-pos` commands above and double-click `Install-POS.cmd` in the extracted folder. Installation creates a `.venv` environment and downloads the dependencies. After installation, use `Start-POS.cmd` whenever starting the host.
+
+**Keeping existing records:** back up and stop the old server before moving its complete `data` folder to a new main laptop. Preserve `data`, `backups`, certificates, and print-helper configuration when updating application files. GitHub contains application code, not your live records.
 
 Open **http://localhost:8765** on the main PC. Keep the server running while either cashier is working.
 
