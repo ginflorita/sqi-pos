@@ -29,7 +29,7 @@ class POSTest(unittest.TestCase):
         self.csrf=self.client.get('/api/state').json['csrf']
         self.call('/setup',{'username':'owner','password':PASSWORD,'display_name':'Owner','bazaar_name':'Test Bazaar','timezone':'Asia/Manila','currency_code':'PHP'})
         self.category=self.call('/categories',{'name':'Handmade'}).json['category_id']
-        self.product=self.call('/products',{'sku':'TEST-01','barcode':'12345678','description':'Test product','category_id':self.category,'unit':'pc','amount_minor':12550,'reason':'Test setup','active':True,'manager_password':PASSWORD}).json['product_id']
+        self.product=self.call('/products',{'sku':'TEST-01','barcode':'12345678','description':'Test product','category_id':self.category,'unit':'pc','amount_minor':12550,'active':True}).json['product_id']
         self.call('/stock',{'document_type':'opening','request_key':'opening-request-0001','reference_no':'TEST','reason':'Opening stock','manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':10}]})
         self.call('/days/open',{'business_date':'2026-10-19','manager_password':PASSWORD})
         self.call('/shifts/open',{'opening_cash_minor':100000})
@@ -128,6 +128,55 @@ class POSTest(unittest.TestCase):
         self.assertEqual(receipt['lines'][0]['description_snapshot'],'New label')
         self.assertEqual(receipt['lines'][0]['unit_price_minor'],14000)
 
+    def test_manager_creates_and_edits_catalog_without_reason_or_password(self):
+        data={'sku':'TEST-02','description':'New item','category_id':self.category,'unit':'pc','amount_minor':8500,'active':True}
+        pid=self.call('/products',data).json['product_id']
+        self.call('/products/'+str(pid),{**data,'description':'Updated description','barcode':'987654321'},'PUT')
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_prices WHERE product_id='+str(pid)),1)
+        self.assertEqual(self.scalar('SELECT reason FROM product_prices WHERE product_id='+str(pid)),'Initial selling price')
+        connection=connect(self.database)
+        try:
+            events=connection.execute("SELECT * FROM audit_events WHERE entity_type='products' AND entity_key=? ORDER BY audit_event_id",(str(pid),)).fetchall()
+            self.assertEqual([r['action'] for r in events],['product.created','product.updated'])
+            self.assertTrue(all(r['actor_user_id']==1 and r['terminal_id'] is not None for r in events))
+            self.assertEqual(json.loads(events[-1]['before_json'])['description'],'New item')
+            self.assertEqual(json.loads(events[-1]['after_json'])['description'],'Updated description')
+            self.assertIsNone(events[-1]['reason'])
+        finally:connection.close()
+
+    def test_only_existing_price_changes_require_a_reason(self):
+        data={'sku':'TEST-01','barcode':'12345678','description':'Should roll back','category_id':self.category,'unit':'pc','amount_minor':15000,'active':True}
+        self.call('/products/'+str(self.product),data,'PUT',expected=400)
+        self.call('/products/'+str(self.product),{**data,'reason':'   '},'PUT',expected=400)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_prices'),1)
+        self.assertEqual(self.scalar('SELECT description FROM products'),'Test product')
+        self.call('/products/'+str(self.product),{**data,'reason':'Supplier cost changed'},'PUT')
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_prices'),2)
+        connection=connect(self.database)
+        try:
+            event=connection.execute("SELECT * FROM audit_events WHERE action='product.updated' ORDER BY audit_event_id DESC LIMIT 1").fetchone()
+            self.assertEqual(event['reason'],'Supplier cost changed')
+            self.assertEqual(json.loads(event['before_json'])['amount_minor'],12550)
+            self.assertEqual(json.loads(event['after_json'])['amount_minor'],15000)
+        finally:connection.close()
+
+    def test_catalog_session_access_does_not_grant_cashier_or_anonymous_writes(self):
+        data={'sku':'TEST-02','description':'Not permitted','category_id':self.category,'unit':'pc','amount_minor':8500,'active':True}
+        second,csrf,_=self.second_cashier()
+        self.call('/products',data,client=second,csrf=csrf,expected=403)
+        self.call('/products/'+str(self.product),data,'PUT',client=second,csrf=csrf,expected=403)
+        response=second.post('/api/products/'+str(self.product)+'/image',data={},headers={'X-CSRF-Token':csrf})
+        self.assertEqual(response.status_code,403)
+        anonymous=self.app.test_client()
+        token=anonymous.get('/api/state').json['csrf']
+        self.call('/products',data,client=anonymous,csrf=token,expected=401)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM products'),1)
+
+    def test_sensitive_changes_still_require_manager_password(self):
+        self.call('/users',{'username':'newuser','display_name':'New user','role':'cashier','active':True,'password':PASSWORD},expected=403)
+        self.call('/stock',{'document_type':'in','request_key':'missing-approval-001','reference_no':'IN','reason':'Delivery','lines':[{'product_id':self.product,'quantity':2}]},expected=403)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),10)
+
     def test_cashier_roles_receipt_scope_and_csrf(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
         second,csrf,_=self.second_cashier()
@@ -197,7 +246,7 @@ class POSTest(unittest.TestCase):
     def test_image_versions_and_backup_integrity(self):
         for color in ('red','green'):
             image=io.BytesIO();Image.new('RGB',(40,40),color).save(image,'PNG');image.seek(0)
-            response=self.client.post('/api/products/'+str(self.product)+'/image',data={'manager_password':PASSWORD,'image':(image,'test.png')},headers={'X-CSRF-Token':self.csrf})
+            response=self.client.post('/api/products/'+str(self.product)+'/image',data={'image':(image,'test.png')},headers={'X-CSRF-Token':self.csrf})
             self.assertEqual(response.status_code,200,response.get_data(as_text=True))
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_images'),2)
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_images WHERE superseded_at IS NULL'),1)

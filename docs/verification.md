@@ -4,7 +4,7 @@ Updated: 2026-10-20 (Asia/Taipei). Release: 0.1. Test/demo data is separate from
 
 Run `python -m unittest discover -s tests -v`. Integration tests use isolated SQLite files in ignored `.test-runs/` directories and separate cookie sessions.
 
-Latest result: **21 tests passed** in 57.735 seconds. JavaScript syntax validation with `node --check static/app.js` also passed.
+Latest result: **25 tests passed** in 58.308 seconds. JavaScript syntax validation with `node --check static/app.js` also passed.
 
 ## Automated coverage
 
@@ -19,6 +19,9 @@ Latest result: **21 tests passed** in 57.735 seconds. JavaScript syntax validati
 - Failed checkout rolls back financial and inventory records together.
 - Historical database rows cannot be edited/deleted; negative stock is rejected.
 - Image versions are retained and included in a verified backup.
+- Managers create/edit products and upload photos without repeated password confirmation; audit attribution remains automatic.
+- Existing price changes require a nonblank reason; rejected changes roll back product details and price together.
+- Cashiers and anonymous browsers cannot write the catalog; stock and account actions retain password confirmation.
 - Login throttling, disabled-account sessions, and idle sessions despite background polling.
 - Receipt reprints create no new sale.
 - Report filters and Excel CSV formula protection.
@@ -31,6 +34,10 @@ Latest result: **21 tests passed** in 57.735 seconds. JavaScript syntax validati
 ## Browser verification
 
 Checked first-run setup, login, pending-laptop approval, product images/grid, saved cart, cash/change, committed acknowledgement receipt, inventory ledger, and reports at a laptop-size viewport. A separate demo sale with total 420.00, paid 500.00, and change 80.00 produced one receipt and the expected inventory/report changes.
+
+On 2026-10-20, checked the simplified product forms in the separate demo workspace. Creating a product shows no reason or password field. Editing a product shows no password field; changing its selling price reveals the required reason field, and restoring the original price hides and disables that field. No sample price changes were saved during this check.
+
+![Product editing without repeated password confirmation](screenshots/product-form.png)
 
 On 2026-10-20, a dedicated demo server deliberately replaced one successful checkout response with HTTP 503 **after the sale committed**. The browser displayed the failure and retained its payment request. Reloading automatically recovered receipt `BZ-001-000010`: total 150.00, paid 200.00, change 50.00. Database verification found exactly one sale, one payment, and one stock deduction for that ticket. The same session also verified manager closure of the previous demo drawer and opening a replacement-browser shift.
 

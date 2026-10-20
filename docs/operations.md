@@ -6,6 +6,8 @@ Install Python 3.11 or later on Laptop 1. Keep the project on its internal drive
 
 Open http://localhost:8765 on the host to create your manager account and bazaar. Confirm currency and timezone. This version uses whole quantities, cash, separate cash drawers, and zero added tax/discounts. Confirm that tax treatment before real trading. Add categories, products, prices, optional photos, and opening stock.
 
+Product creation, normal product edits, and photo uploads use the signed-in manager session without another password prompt. A new product's initial price gets an automatic audit reason. Changing an existing selling price requires a reason; leaving its price unchanged does not. The audit records the manager, time, and before/after details automatically. Stock, financial, and account approvals still require password confirmation.
+
 The server runs Cheroot with eight worker threads and debug mode disabled. Startup checks SQLite integrity, foreign keys, and stock-ledger reconciliation. It stops if these fail. Local HTTP binds only to loopback; LAN mode requires HTTPS.
 
 ## Connect two laptops

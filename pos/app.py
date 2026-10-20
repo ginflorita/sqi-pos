@@ -357,11 +357,10 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @signed_in(True)
     def product_save(product_id=None):
         data = payload()
-        reauth(data)
         fields = [text_field(data, 'sku', 60), text_field(data, 'barcode', 80, True) or None,
                   text_field(data, 'description', 200), integer(data, 'category_id', 1), text_field(data, 'unit', 20)]
         require(type(data.get('active', True)) is bool, 'Invalid product status.')
-        amount, reason = integer(data, 'amount_minor', 1), text_field(data, 'reason', 300)
+        amount = integer(data, 'amount_minor', 1)
         with transaction(db()):
             require(db().execute('SELECT 1 FROM categories WHERE category_id=? AND active=1', (fields[3],)).fetchone(), 'Choose an active category.')
             before = None
@@ -373,6 +372,14 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             else:
                 product_id = db().execute('INSERT INTO products(sku,barcode,description,category_id,unit,active) VALUES(?,?,?,?,?,?)', (*fields, int(data.get('active', True)))).lastrowid
             current = db().execute('SELECT amount_minor FROM product_prices WHERE product_id=? ORDER BY price_id DESC LIMIT 1', (product_id,)).fetchone()
+            if before:
+                before['amount_minor']=current[0] if current else None
+            reason=None
+            if not current:
+                reason='Initial selling price'
+            elif current[0]!=amount:
+                reason=text_field(data,'reason',300,optional=True)
+                require(reason,'Add a reason for changing the selling price.')
             if not current or current[0] != amount:
                 db().execute('INSERT INTO product_prices(product_id,amount_minor,effective_at,changed_by_user_id,reason) VALUES(?,?,?,?,?)',
                              (product_id, amount, now(), g.user['user_id'], reason))
@@ -384,7 +391,6 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @app.post('/api/products/<int:product_id>/image')
     @signed_in(True)
     def image_upload(product_id):
-        reauth(request.form)
         upload = request.files.get('image')
         require(upload, 'Choose an image.')
         raw = upload.read(5 * 1024 * 1024 + 1)
