@@ -132,3 +132,7 @@ Before real trading, confirm the bazaar's currency, tax treatment, receipt conte
 - [Database schema: 28 tables with descriptive primary keys](docs/database-schema.md)
 - [Executable SQL schema](pos/schema.sql)
 - [Verification and remaining equipment checks](docs/verification.md)
+
+## Receipt printers on each cashier laptop
+
+For remembered USB printers and automatic printing after payment confirmation, follow [printer setup](docs/printer-setup.md). An administrator configures each laptop in Settings and runs `Start-Print-Helper.cmd` locally. Automatic printing stays off until setup; browser printing remains available. Physical printer output must be verified when hardware is available.

@@ -123,3 +123,7 @@ Before the bazaar, test the actual router, both laptops, printer, external backu
 ## References
 
 [SQLite transactions](https://www.sqlite.org/lang_transaction.html), [WAL](https://www.sqlite.org/wal.html), [online backup API](https://www.sqlite.org/backup.html), and [Flask security](https://flask.palletsprojects.com/en/stable/web-security/).
+
+## Per-laptop receipt printers
+
+See [printer setup](printer-setup.md) for separate USB printers, administrator configuration, helper startup, and interrupted print-job recovery. Print jobs are committed with sales but printer I/O happens afterward; never repeat checkout to repair a print failure. After database restore, re-pair each print helper before enabling automatic printing.

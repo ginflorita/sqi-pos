@@ -109,3 +109,13 @@ HTTPS startup was verified on loopback with a generated local certificate and ce
 Complete a sale from each physical laptop; disconnect/reconnect Laptop 2 during confirmation; check printer failure/reprint; reconcile both cash drawers; verify the external backup drive and a restore; rehearse a power interruption; confirm actual currency, tax treatment, receipt content, and dates.
 
 Fractional quantities, non-cash payments, tax/discount configuration, catalog imports, additional bazaar creation, Windows startup-service installation, and automatic backup deletion are outside version 0.1.
+
+## Separate laptop receipt printers — 2026-10-20
+
+- Added manager printer setup in Settings, per-terminal pairing, saved queue and 58/80 mm width, and an optional local Windows print helper.
+- One automatic print job is committed with each sale when enabled. Checkout retries cannot create another automatic job. Claims are never automatically replayed after uncertain output. Explicit copies and resolution are audited.
+- Verified 28 backend tests (42.518 s); focused printer and restore tests passed after the final changes. Tests include manager permissions, isolated terminals, invalid/revoked helper tokens, rejected browser-origin helper requests, unique jobs on checkout retry, lost claim response, idempotent result acknowledgement, failed printing with unchanged sale/payment/stock totals, and no printer replay after restoring a backup.
+- Windows installed-printer enumeration succeeded. The PrintDocument adapter compiled in validation mode without sending a document. No installed printer was selected or used by this verification.
+- Demo UI: Settings shows the printer setup panel and controls; [screenshot](screenshots/printer-settings.png).
+- Host update: verified database snapshot before restart; existing sales, payments, stock movements, products and stock totals matched after restart. Host health responded HTTP 200. No production sale or stock adjustment was used as a test.
+- Physical USB output, margins, long receipt pagination and cutting require the user's eventual printer. Automatic printing remains off until administrator setup.

@@ -173,6 +173,10 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         g.csrf = csrf if re.fullmatch(r'[A-Za-z0-9_-]{43}', csrf) else secrets.token_urlsafe(32)
         if not request.path.startswith('/api/'):
             return
+        if request.path in ('/api/print-agent/poll', '/api/print-agent/result'):
+            # Helpers authenticate with a separately paired, terminal-scoped token.
+            require(not request.headers.get('Origin'), 'Browser requests are not accepted by the print helper API.', 403)
+            return
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             require(request.headers.get('Origin') in (None, request.host_url.rstrip('/')), 'Request origin rejected.', 403)
             require(bool(csrf) and secrets.compare_digest(request.headers.get('X-CSRF-Token', ''), g.csrf), 'Refresh the page and try again.', 403)
@@ -757,6 +761,11 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             db().execute("INSERT INTO checkout_requests(request_key,purchase_ticket_id,request_hash,status,sale_id,created_at,finished_at) VALUES(?,?,?,'completed',?,?,?)", (key,tid,fingerprint,sid,stamp,stamp))
             db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,created_at) VALUES(?,'issued','screen',?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],stamp))
             event('sale.completed', 'sales', sid, day=s['bazaar_day_id'], after={'total_minor':q['total_minor'],'receipt_number':number})
+            printer = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=? AND enabled=1', (g.terminal['terminal_id'],)).fetchone()
+            if printer:
+                print_job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,requested_by_user_id,created_at)
+                    VALUES(?,?,'automatic',?,?,?,?)''', (sid,g.terminal['terminal_id'],printer['printer_name'],printer['paper_width_mm'],g.user['user_id'],stamp)).lastrowid
+                event('receipt.automatic_queued', 'receipt_print_jobs', print_job, after={'sale_id':sid,'printer_name':printer['printer_name']})
         return jsonify(sale_id=sid, replayed=False)
 
     def sale_access(sid):
@@ -765,6 +774,9 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         require(sale, 'Sale not found.', 404)
         require(g.user['role'] == 'manager' or sale['cashier_user_id'] == g.user['user_id'], 'You can view only your own receipts.', 403)
         return sale
+
+    from .printing import register_printing
+    register_printing(app, db, transaction, signed_in, require, payload, integer, text_field, event, sale_access)
 
     @app.get('/api/sales/<int:sid>')
     @signed_in()
@@ -782,6 +794,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         reason = text_field(data, 'reason', 300, optional=True) or 'Customer copy'
         with transaction(db()):
             sale = sale_access(sid)
+            require(not db().execute("SELECT 1 FROM receipt_print_jobs WHERE sale_id=? AND status IN ('queued','claimed')", (sid,)).fetchone(),
+                    'This receipt already has a pending print job. Check the printer and resolve its print record in Settings before making another copy.', 409)
             db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,reason,created_at) VALUES(?,'reprint','browser',?,?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],reason,now()))
             event('receipt.print_requested', 'sales', sid, day=sale['bazaar_day_id'], reason=reason)
         return jsonify(ok=True)

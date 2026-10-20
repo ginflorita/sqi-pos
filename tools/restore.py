@@ -32,6 +32,9 @@ def main():
     try:
         with transaction(connection):
             connection.execute('DELETE FROM auth_sessions')
+            # A restored snapshot must never replay old printer work or trust old helper tokens.
+            connection.execute("UPDATE receipt_print_jobs SET status='failed',error_message='Restored backup: check receipt before printing a copy' WHERE status IN ('queued','claimed')")
+            connection.execute('DELETE FROM receipt_printers')
             connection.execute("UPDATE backup_runs SET status='failed',error_message='Snapshot restored; previous in-progress run is no longer active' WHERE status='running'")
             audit(connection,'backup.restored','system',after={'backup':args.backup.name,'sha256':checksum})
     finally:

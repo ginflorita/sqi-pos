@@ -1,6 +1,6 @@
 # Database schema · version 0.1
 
-Implemented by [pos/schema.sql](../pos/schema.sql), with additional immutability triggers in [pos/db.py](../pos/db.py). The 28 table names are plural. Every primary key is descriptive; there is no generic `id` column. `product_prices.price_id` uses the requested short name. Foreign keys normally use the referenced key's name. Role prefixes distinguish multiple user references, such as `cashier_user_id` and `approved_by_user_id`; both reference `users.user_id`.
+Implemented by [pos/schema.sql](../pos/schema.sql), with additional immutability triggers in [pos/db.py](../pos/db.py). The 30 table names are plural. Every primary key is descriptive; there is no generic `id` column. `product_prices.price_id` uses the requested short name. Foreign keys normally use the referenced key's name. Role prefixes distinguish multiple user references, such as `cashier_user_id` and `approved_by_user_id`; both reference `users.user_id`.
 
 IDs are internal integer keys. `sku`, barcode, ticket number, and receipt number are separate user-facing identifiers. Money is stored as integer minor units (`*_minor`), never binary floating-point values. The initial quantity model is whole base units. Event time is stored in UTC; `business_date` is the bazaar's local reporting date, using its configured timezone.
 
@@ -71,3 +71,12 @@ The bold first field is the primary key. `NULL` means optional where stated; exe
 ## Report queries
 
 Reports use application queries over source tables; no named SQL views or independently editable report totals are created in version 0.1. Sales reports group by day, product, historical category, and cashier, with filters for business date, day, product, category, cashier, and laptop. Inventory movement history and shift reconciliation have separate screens.
+
+## Per-laptop receipt printing
+
+See [printer setup](printer-setup.md). These additive tables are created on startup without clearing existing records; schema compatibility remains version 1.
+
+| Table | Columns | Rules |
+| --- | --- | --- |
+| receipt_printers | **receipt_printer_id**, terminal_id, token_hash, printer_name, paper_width_mm, enabled, available_printers_json, last_seen_at, configured_by_user_id, updated_at | One configuration per terminal; token stored hashed; 58/80 mm; manager-only configuration. |
+| receipt_print_jobs | **receipt_print_job_id**, sale_id, terminal_id, job_kind, printer_name, paper_width_mm, status, requested_by_user_id, created_at, claimed_at, finished_at, error_message | One automatic job per sale (partial unique index); additional copies explicit; queued → claimed → submitted/failed; no automatic re-claim. Printer/paper captured at enqueue time. Status transitions are audited; print records do not change financial history. |

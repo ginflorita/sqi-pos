@@ -299,6 +299,45 @@ class POSTest(unittest.TestCase):
         self.call('/users/'+str(uid),{'display_name':'Second cashier','role':'cashier','active':False,'password':'','manager_password':PASSWORD},'PUT')
         self.assertEqual(second.get('/api/catalog').status_code,401)
 
+    def test_automatic_receipt_print_job_is_unique_and_terminal_scoped(self):
+        token=self.call('/receipt-printer/pair',{}).json['pairing_token']
+        agent=self.app.test_client()
+        def poll(token=token):
+            return agent.post('/api/print-agent/poll',json={'printers':['USB Receipt']},headers={'Authorization':'Bearer '+token})
+        self.assertEqual(poll('x'*43).status_code,403)
+        self.assertEqual(agent.post('/api/print-agent/poll',json={'printers':[]},headers={'Authorization':'Bearer '+token,'Origin':'http://localhost'}).status_code,403)
+        self.assertEqual(poll().status_code,200)
+        self.call('/receipt-printer',{'printer_name':'Other laptop printer','paper_width_mm':80,'enabled':True},'PUT',expected=409)
+        self.call('/receipt-printer',{'printer_name':'USB Receipt','paper_width_mm':80,'enabled':True},'PUT')
+        body=self.checkout_body(self.ticket())
+        sale=self.call('/checkout',body).json['sale_id']
+        self.call('/checkout',body)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM receipt_print_jobs'),1)
+        self.call('/sales/'+str(sale)+'/reprint',{},expected=409)
+        second,csrf,uid=self.second_cashier()
+        self.call('/receipt-printer/pair',{},client=second,csrf=csrf,expected=403)
+        self.assertEqual(second.get('/api/receipt-printer').json['jobs'],[])
+        claimed=poll().json['job']
+        self.assertEqual(claimed['printer_name'],'USB Receipt')
+        import base64
+        image=Image.open(io.BytesIO(base64.b64decode(claimed['image_base64'])))
+        self.assertEqual(image.width,576)
+        self.assertIsNone(poll().json['job'])  # Lost response or helper crash never prints again.
+        self.call('/sales/'+str(sale)+'/printer-copy',{},expected=409)
+        result={'receipt_print_job_id':claimed['receipt_print_job_id'],'status':'failed','error_message':'USB disconnected: check queue'}
+        for _ in range(2):
+            self.assertEqual(agent.post('/api/print-agent/result',json=result,headers={'Authorization':'Bearer '+token}).status_code,200)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM audit_events WHERE action='receipt.print_failed'"),1)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),1)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM payments'),1)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
+        self.call('/sales/'+str(sale)+'/printer-copy',{})
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM receipt_print_jobs'),2)
+        copy=poll().json['job']
+        self.call('/receipt-printer/jobs/'+str(copy['receipt_print_job_id'])+'/resolve',{'reason':'Stopped helper and checked Windows queue'})
+        self.call('/receipt-printer/pair',{})
+        self.assertEqual(poll().status_code,403)  # Re-pair revokes the old token.
+
     def test_print_failure_does_not_make_a_second_sale(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
         self.call('/sales/'+str(sid)+'/reprint',{})
@@ -376,6 +415,9 @@ class POSTest(unittest.TestCase):
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM audit_events WHERE action='shift.closed_by_manager'"),1)
 
     def test_verified_restore_to_new_directory_keeps_live_data(self):
+        token=self.call('/receipt-printer/pair',{}).json['pairing_token']
+        self.client.post('/api/print-agent/poll',json={'printers':['USB Receipt']},headers={'Authorization':'Bearer '+token})
+        self.call('/receipt-printer',{'printer_name':'USB Receipt','paper_width_mm':58,'enabled':True},'PUT')
         self.call('/checkout',self.checkout_body(self.ticket()))
         self.call('/backups',{'manager_password':PASSWORD})
         backup=next((self.folder/'backups').glob('*.sqlite3'))
@@ -390,6 +432,9 @@ class POSTest(unittest.TestCase):
         try:
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM sales').fetchone()[0],1)
             self.assertEqual(connection.execute('SELECT COUNT(*) FROM auth_sessions').fetchone()[0],0)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM receipt_printers').fetchone()[0],0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM receipt_print_jobs WHERE status='failed'").fetchone()[0],1)
+            self.assertEqual(self.scalar("SELECT COUNT(*) FROM receipt_print_jobs WHERE status='queued'"),1)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM audit_events WHERE action='backup.restored'").fetchone()[0],1)
         finally:connection.close()
         recovered_client=restored.test_client()

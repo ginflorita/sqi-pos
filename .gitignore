@@ -20,3 +20,4 @@ exports/
 *.log
 .pytest_cache/
 .test-runs/
+.print-helper/
