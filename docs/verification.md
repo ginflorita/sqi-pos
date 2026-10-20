@@ -36,6 +36,10 @@ Latest result: **27 tests passed** in 63.535 seconds. JavaScript syntax validati
 
 Checked first-run setup, login, pending-laptop approval, product images/grid, saved cart, cash/change, committed acknowledgement receipt, inventory ledger, and reports at a laptop-size viewport. A separate demo sale with total 420.00, paid 500.00, and change 80.00 produced one receipt and the expected inventory/report changes.
 
+On 2026-10-20, enlarged and prioritized **Current order**. At the checked laptop viewport, the panel measured approximately 461 px wide, the total used 36 px text, quantity buttons measured 36 px wide, and **Review payment** measured 56 px high. Adding four different items confirmed that the item list scrolled while payment stayed visible. The larger +/− controls changed one ₱150 item to qty 2 / ₱300 and back to qty 1 / ₱150. These checks used an unpaid ticket in `.demo`; no sale was completed and no production records were changed. The CSS places the order first in a single-column layout at widths up to 1000 px. Whitespace checks passed; this CSS-only update did not rerun the integration suite.
+
+![Larger Current order panel and payment controls](screenshots/larger-current-order.png)
+
 On 2026-10-20, checked the simplified product forms in the separate demo workspace. Creating a product shows no reason or password field. Editing a product shows no password field; changing its selling price reveals the required reason field, and restoring the original price hides and disables that field. No sample price changes were saved during this check.
 
 ![Product editing without repeated password confirmation](screenshots/product-form.png)
