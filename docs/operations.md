@@ -47,6 +47,14 @@ Create the second cashier in Team & laptops. Sign in on Laptop 2 and name it. Th
 
 Use one ticket per physical customer purchase. One ticket can produce only one sale; retries retrieve that sale. Identical baskets sold within two minutes require a separate-purchase confirmation. The application cannot recognize physical customers.
 
+### Acknowledgement receipt branding
+
+Receipts and their print/PDF layout show the supplied SQI logo, **SQI Group Int'l. Corp - Philippines**, telephone **8-364-7561**, head office **18 Pineapple Rd, Malabon, 1475 Metro Manila, Philippines**, and **https://sqigroup.ph/**. The footer lists office hours **9:00 AM – 6:00 PM, Monday – Saturday**. The bazaar name, receipt number, day, cashier, items, totals, cash, and change remain on each receipt.
+
+The logo is bundled at `static/sqi-logo.png`, so displaying or printing it needs no connection to the source network share or internet. The same receipt layout is used when viewing saved receipts and requesting a print/PDF copy. Printing waits for the logo image to decode. Check the final paper layout on the actual receipt printer.
+
+### Orders and corrections
+
 Transfer orders using the icon beside the ticket number. The receiving cashier needs an open same-day shift and no current order, then refreshes their counter. Only the current owner and laptop can confirm payment.
 
 After a lost payment response, keep the same browser and ticket. Refresh when connected: the app checks the saved pending request and retrieves the original receipt if committed, or allows retry of that request. Resolve its outcome before starting a new order. Checkout pauses if the host or network is unavailable.

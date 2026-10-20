@@ -44,6 +44,14 @@ Also checked the stock movement form: **Stock in** and **Opening stock** label t
 
 ![Stock-in with an optional reason](screenshots/stock-reason.png)
 
+On 2026-10-20, checked SQI receipt branding against saved demo receipt `BZ-001-000010`. The supplied local PNG loaded at its original 5442 × 3064 resolution and displayed at 150 px wide. Verified the company name, full head office address, telephone, website link, office hours, and existing receipt/payment details. The dialog opens at the company header; its footer remains available by scrolling. The production host served the logo successfully with HTTP 200. JavaScript syntax and whitespace checks passed. This presentation change did not rerun the 27-test integration suite recorded above.
+
+The company header and office-hours footer are inside the same receipt content used by the existing 80 mm print stylesheet. Actual printer/PDF pagination remains an equipment check.
+
+![SQI acknowledgement receipt header](screenshots/sqi-receipt.png)
+
+![SQI receipt totals and office hours](screenshots/sqi-receipt-footer.png)
+
 On 2026-10-20, a dedicated demo server deliberately replaced one successful checkout response with HTTP 503 **after the sale committed**. The browser displayed the failure and retained its payment request. Reloading automatically recovered receipt `BZ-001-000010`: total 150.00, paid 200.00, change 50.00. Database verification found exactly one sale, one payment, and one stock deduction for that ticket. The same session also verified manager closure of the previous demo drawer and opening a replacement-browser shift.
 
 This simulates an uncertain response after commit; it does not replace a physical Wi-Fi-disconnection or power-loss test. The fault-injection helper is `tests/preview_server.py`, restricted to the `.demo/` workspace and loopback. It is not used by `run.py`.
