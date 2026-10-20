@@ -125,3 +125,7 @@ Fractional quantities, non-cash payments, tax/discount configuration, catalog im
 Product photos in Browse products now open a large modal with the full uncropped image, SKU and description. Photo viewing is a separate button from quantity selection, remains available on out-of-stock products, and never adds an order line. Product details and + continue to open the quantity confirmation. Thumbnails use contain sizing so the whole photo is visible.
 
 Verified in the isolated demo: open photo, close viewer, open quantity selection, cancel; current order remained empty. JavaScript syntax and diff checks passed. [Viewer screenshot](screenshots/product-photo-viewer.png). No production data changes or server restart required.
+
+## Compact product grid — 2026-10-20
+
+Reduced card padding, image height to 92 px, and card spacing. Product browsing uses container queries: 2–6 columns according to the space available beside the current order. Verified six columns at 1328 px browsing width (177 px card height), and three columns at 504 px in standard view. Photo viewing and quantity controls remain separate. [Six-column screenshot](screenshots/compact-six-products.png). CSS-only update; no production records changed.
