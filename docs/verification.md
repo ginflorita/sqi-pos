@@ -44,6 +44,10 @@ The checkout heading now uses one compact row for **The counter**, its subtitle,
 
 ![Compact single-row checkout heading](screenshots/compact-checkout-heading.png)
 
+Product selection now opens **Choose quantity** for both product clicks and barcode Enter. Browser checks in `.demo` confirmed that product click/double-click followed by Cancel left ticket version 9 and its 19 update events unchanged. An excessive quantity (8 with 7 available) was blocked. Confirming qty 3 once added exactly 3 units and advanced the ticket to version 10 with 20 update events. Selecting the same barcode then showed 3 already in the order and 4 available; Escape made no additional cart change. The demo retained 10 sales and 184 stock units throughout. The confirmation button briefly ignores the opening double-click, and submissions in progress cannot be submitted again. JavaScript syntax and whitespace checks passed; no production data or sale was changed by these checks.
+
+![Quantity confirmation before adding a product](screenshots/product-quantity.png)
+
 On 2026-10-20, checked the simplified product forms in the separate demo workspace. Creating a product shows no reason or password field. Editing a product shows no password field; changing its selling price reveals the required reason field, and restoring the original price hides and disables that field. No sample price changes were saved during this check.
 
 ![Product editing without repeated password confirmation](screenshots/product-form.png)

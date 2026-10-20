@@ -40,7 +40,7 @@ Create the second cashier in Team & laptops. Sign in on Laptop 2 and name it. Th
 
 1. The manager opens Day 1, Day 2, etc. with the business date. The date must follow the prior day. It remains open across midnight until explicitly closed.
 2. Each cashier opens a shift with the actual starting cash in their own drawer.
-3. Search products/SKUs, or scan a barcode and press Enter. Add quantities. Cart changes save to the host; available stock is rechecked at checkout.
+3. Search products/SKUs and click a product, or scan a barcode and press Enter. In **Choose quantity**, enter **Quantity to add**, review the amount, and confirm **Add to order**. Clicking a product alone does not add it; Cancel or Escape leaves the order unchanged. Existing quantities are shown separately, and additional quantities cannot exceed remaining available stock. Confirmed cart changes save to the host; available stock is rechecked at checkout.
 4. Review payment, enter cash paid, verify change, and confirm. The receipt comes from the committed sale. **Print / save PDF** opens printing directly, with no reason prompt. Each request automatically records `Customer copy`, the receipt, user, laptop, and time in the audit. Browser printing cannot prove that paper actually printed.
 5. Complete, transfer, or cancel open tickets before closing shifts. Count actual cash. Variances are retained for manager review.
 6. Close every shift and ticket before closing the day. Check the backup result after day close.

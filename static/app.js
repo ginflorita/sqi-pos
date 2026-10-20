@@ -27,7 +27,7 @@ const minor = value => {
 };
 const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toString(16).padStart(2,'0')).join('');
 const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:'checkout',products:[],categories:[],ticket:null,cart:[],search:'',category:'all',filters:{},online:true,paying:false,cartError:false};
-let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0;
+let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false;
 async function api(path, method='GET', data, isForm=false){
   let response;
   try { response=await fetch('/api'+path,{method,credentials:'same-origin',headers:{...(method!=='GET'?{'X-CSRF-Token':S.csrf}:{}),...(!isForm&&data?{'Content-Type':'application/json'}:{})},body:data?(isForm?data:JSON.stringify(data)):undefined}); }
@@ -49,7 +49,7 @@ function pill(text,style='success'){return `<span class="pill ${style}"><span cl
 function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">YOUR BAZAAR, IN ORDER</div><h1>${e(title)}</h1><p>${e(description)}</p></div><div class="actions">${actions}</div></div>`;}
 function modal(title,body,wide=false){$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
 function closeModal(){if(S.paying)return;$('#modal-root').innerHTML='';currentReceipt=null;}
-function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<form id="modal-form" class="form-grid">${body}<div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green">${submit}${icon('arrow')}</button></div></form>`,wide);$('#modal-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const submitButton=$('[type=submit]',form);submitButton.disabled=true;$('.form-error',form).textContent='';try{await onSubmit(Object.fromEntries(new FormData(form)),form);}catch(error){$('.form-error',form).textContent=error.message;}finally{submitButton.disabled=false;}});}
+function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<form id="modal-form" class="form-grid">${body}<div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green">${submit}${icon('arrow')}</button></div></form>`,wide);$('#modal-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const submitButton=$('[type=submit]',form);if(submitButton.disabled)return;submitButton.disabled=true;$('.form-error',form).textContent='';try{await onSubmit(Object.fromEntries(new FormData(form)),form);}catch(error){$('.form-error',form).textContent=error.message;}finally{submitButton.disabled=false;}});}
 async function refreshState(){const data=await api('/state');Object.assign(S,data);return data;}
 async function loadCatalog(){const data=await api('/catalog');S.products=data.products;S.categories=data.categories;}
 function renderAuth(setup){
@@ -92,7 +92,7 @@ async function renderCheckout(){
   S.cartError=false;
   $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions">${button('Refresh stock','refresh-catalog','light','refresh')}</div></div>`+gate()+`<div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Search products, SKU or scan barcode…" aria-label="Search products" value="${e(S.search)}" autocomplete="off"><kbd>/</kbd></div></div><div class="category-tabs" id="category-tabs"></div><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-grid" id="product-grid"></div><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
   $('#product-search').addEventListener('input',ev=>{S.search=ev.target.value;renderProducts();});
-  $('#product-search').addEventListener('keydown',ev=>{if(ev.key==='Enter'){ev.preventDefault();const matches=S.products.filter(p=>p.active&&(p.sku.toLowerCase()===S.search.toLowerCase()||p.barcode===S.search));if(matches.length===1)addProduct(matches[0].product_id).catch(err=>toast(err.message,true));}});
+  $('#product-search').addEventListener('keydown',ev=>{if(ev.key==='Enter'){ev.preventDefault();const matches=S.products.filter(p=>p.active&&(p.sku.toLowerCase()===S.search.toLowerCase()||p.barcode===S.search));if(matches.length===1)productQuantityModal(matches[0].product_id).catch(err=>toast(err.message,true));}});
   renderCategories();renderProducts();renderCart();
   if(recoveredSale){await showReceipt(recoveredSale);toast('Recovered the saved payment. This is the original receipt.');}
   else if(pendingOpen)await paymentModal();
@@ -103,7 +103,7 @@ function productVisual(p){return p.product_image_id?`<img src="/api/images/${p.p
 function renderProducts(){
   const search=S.search.toLowerCase();const products=S.products.filter(p=>p.active&&(S.category==='all'||String(p.category_id)===String(S.category))&&[p.sku,p.description,p.barcode||''].some(v=>v.toLowerCase().includes(search)));
   $('#product-count').textContent=`${products.length} products`;
-  $('#product-grid').innerHTML=products.map(p=>`<button class="product-card ${p.quantity_on_hand===0?'sold-out':''}" data-add="${p.product_id}" ${!p.quantity_on_hand?'disabled':''} aria-label="Add ${e(p.description)}"><div class="product-visual" style="--tile:${tileColors[p.category_id%tileColors.length]}">${productVisual(p)}<span class="stock-badge ${p.quantity_on_hand<6?'low':''}">${p.quantity_on_hand?p.quantity_on_hand+' in stock':'Out of stock'}</span></div><div class="product-detail"><div class="eyebrow">${e(p.category_name)}</div><h3>${e(p.description)}</h3><div class="product-bottom"><strong>${money(p.amount_minor)} <small>/ ${e(p.unit)}</small></strong><span class="add-badge">+</span></div></div></button>`).join('')||`<div class="no-results">${empty(S.products.length?'No products found':'Your shelves are ready',S.products.length?'Try another name, SKU, or category.':'Add your products and opening stock to get started.',S.user.role==='manager'?'new-product':'', 'Add a product')}</div>`;
+  $('#product-grid').innerHTML=products.map(p=>`<button class="product-card ${p.quantity_on_hand===0?'sold-out':''}" data-add="${p.product_id}" ${!p.quantity_on_hand?'disabled':''} aria-label="Choose quantity for ${e(p.description)}"><div class="product-visual" style="--tile:${tileColors[p.category_id%tileColors.length]}">${productVisual(p)}<span class="stock-badge ${p.quantity_on_hand<6?'low':''}">${p.quantity_on_hand?p.quantity_on_hand+' in stock':'Out of stock'}</span></div><div class="product-detail"><div class="eyebrow">${e(p.category_name)}</div><h3>${e(p.description)}</h3><div class="product-bottom"><strong>${money(p.amount_minor)} <small>/ ${e(p.unit)}</small></strong><span class="add-badge">+</span></div></div></button>`).join('')||`<div class="no-results">${empty(S.products.length?'No products found':'Your shelves are ready',S.products.length?'Try another name, SKU, or category.':'Add your products and opening stock to get started.',S.user.role==='manager'?'new-product':'', 'Add a product')}</div>`;
 }
 function cartTotal(){return S.cart.reduce((total,l)=>total+(S.products.find(p=>p.product_id===l.product_id)?.amount_minor||0)*l.quantity,0);}
 function renderCart(){
@@ -111,6 +111,41 @@ function renderCart(){
   $('#cart').innerHTML=`<div class="cart-header"><h2>Current order <span class="count-bubble">${units}</span></h2><button class="icon-btn" data-action="cancel-ticket" title="Cancel order" aria-label="Cancel order" ${!S.ticket?'disabled':''}>${icon('close')}</button></div><div class="cart-ticket"><span>${S.ticket?e(S.ticket.ticket_number):'A new order awaits'}</span><span>${e(S.user.display_name.split(' ')[0])}</span></div><div class="cart-lines">${S.cart.length?S.cart.map(l=>{const p=S.products.find(p=>p.product_id===l.product_id);if(!p)return '';return `<div class="cart-line"><div class="cart-thumb">${productVisual(p)}</div><div><h3>${e(p.description)}</h3><small>${money(p.amount_minor)} / ${e(p.unit)}</small><div class="qty-control"><button data-qty="${p.product_id}" data-delta="-1" aria-label="Remove one ${e(p.description)}">−</button><span>${l.quantity}</span><button data-qty="${p.product_id}" data-delta="1" aria-label="Add one ${e(p.description)}">+</button></div></div><strong>${money(p.amount_minor*l.quantity)}</strong></div>`;}).join(''):`<div class="cart-empty">${icon('cart')}<p>A little empty for now.<br>Choose a product to start an order.</p></div>`}</div><div class="cart-summary"><div class="sum-row"><span>Subtotal</span><span>${money(cartTotal())}</span></div><div class="sum-row"><span>Items</span><span>${units} ${units===1?'item':'items'}</span></div><div class="sum-row total"><span>Total amount</span><strong>${money(cartTotal())}</strong></div>${button('Review payment','pay','green','arrow',!S.cart.length||!S.shift||S.cartError?'disabled':'')}</div><div class="cart-foot">${S.cartError?'Cart needs a refresh before payment':S.ticket?'Saved to this ticket · Cash payment':'One ticket. One payment. One receipt.'}</div>`;
   if(S.ticket){const transfer=document.createElement('button');transfer.type='button';transfer.className='icon-btn';transfer.dataset.action='transfer-ticket';transfer.setAttribute('aria-label','Transfer this order');transfer.title='Transfer this order';transfer.innerHTML=icon('users');$('.cart-ticket').appendChild(transfer);}
   if(cartPending){$('.cart-foot').textContent='Saving this ticket…';$('[data-action=pay]').disabled=true;}
+}
+async function productQuantityModal(pid){
+  if(quantityDialogOpening||$('.modal')||S.paying)return;
+  quantityDialogOpening=true;
+  try{
+    await cartQueue;
+    requireClient(S.day&&S.shift,'Open the bazaar day and your shift before starting a sale.');
+    requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
+    if(S.ticket)requireClient(!localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`),'Review the previous payment result before changing this order.');
+    const product=S.products.find(p=>p.product_id===pid),existing=S.cart.find(l=>l.product_id===pid)?.quantity||0;
+    requireClient(product?.active,'This product is no longer available. Refresh the counter.');
+    const available=product.quantity_on_hand-existing;
+    requireClient(available>0,'All available stock for this item is already in the order.');
+    formModal('Choose quantity',`<div class="quantity-product field full"><div class="cart-thumb">${productVisual(product)}</div><div><h3>${e(product.description)}</h3><small>${e(product.sku)} · ${money(product.amount_minor)} / ${e(product.unit)}</small></div></div><div class="field full"><small>Available to add: ${available} ${e(product.unit)}.${existing?' Already in order: '+existing+' '+e(product.unit)+'.':''} Nothing is added until you confirm.</small></div>`+field('Quantity to add','quantity','number','1',`required min="1" max="${available}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>Amount to add</span><strong id="quantity-add-total">${money(product.amount_minor)}</strong></div>`,async data=>{
+      const quantity=Number(data.quantity);
+      requireClient(Number.isSafeInteger(quantity)&&quantity>=1,'Enter a whole quantity of at least 1.');
+      requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
+      await loadCatalog();
+      const current=S.products.find(p=>p.product_id===pid),inOrder=S.cart.find(l=>l.product_id===pid)?.quantity||0;
+      requireClient(current?.active,'This product is no longer available. Refresh the counter.');
+      requireClient(quantity+inOrder<=current.quantity_on_hand,'That quantity exceeds the stock currently available. Reopen the product to review stock.');
+      requireClient(current.amount_minor===product.amount_minor,'The selling price changed. Reopen the product to review its price.');
+      await addProduct(pid,quantity);
+      requireClient(!S.cartError,'The order could not be saved. Refresh the counter before trying again.');
+      closeModal();renderProducts();toast(quantity+' × '+product.description+' added to the order.');
+    },'Add to order');
+    const form=$('#modal-form'),quantityInput=$('[name=quantity]',form),confirmButton=$('[type=submit]',form);
+    confirmButton.disabled=true;
+    setTimeout(()=>{if(form.isConnected)confirmButton.disabled=false;},250);
+    quantityInput.addEventListener('input',()=>{
+      const quantity=Number(quantityInput.value);
+      $('#quantity-add-total',form).textContent=Number.isSafeInteger(quantity)&&quantity>=1&&quantity<=available?money(quantity*product.amount_minor):'—';
+    });
+    quantityInput.select();
+  }finally{quantityDialogOpening=false;}
 }
 async function addProduct(pid,delta=1){
   if(!S.day||!S.shift)throw new Error('Open the bazaar day and your shift before starting a sale.');
@@ -247,7 +282,7 @@ document.addEventListener('click',async ev=>{
   try{
     if(target.dataset.page){if(S.paying)return;await cartQueue;return await navigate(target.dataset.page);}
     if(target.dataset.category){S.category=target.dataset.category;renderCategories();renderProducts();return;}
-    if(target.dataset.add){await addProduct(Number(target.dataset.add));return;}
+    if(target.dataset.add){await productQuantityModal(Number(target.dataset.add));return;}
     if(target.dataset.qty){await addProduct(Number(target.dataset.qty),Number(target.dataset.delta));return;}
     if(target.dataset.cash){$('#amount-paid').value=(Number(target.dataset.cash)/100).toFixed(2);$('#amount-paid').dispatchEvent(new Event('input'));return;}
     const action=target.dataset.action;if(!action)return;

@@ -38,7 +38,7 @@ Each cashier opens a shift with an opening cash count. Closing records expected 
 
 ## Checkout and duplicate prevention
 
-1. A cashier creates one purchase ticket for the customer's purchase, searches or scans items, and adds quantities to its cart.
+1. A cashier creates one purchase ticket for the customer's purchase and searches or scans items. Product selection opens a quantity dialog with the price, amount to add, available stock, and any existing order quantity. The cashier confirms **Add to order** before the cart changes. Cancel/Escape adds nothing. Product double-clicks do not bypass confirmation; barcode entry follows the same flow.
 2. The app calculates totals on the server. The cashier enters the payment amount and reviews the change.
 3. Confirmation sends the ticket ID, a unique request key, and a hash of the confirmed cart/payment. The browser may disable the button, but server and database rules provide the actual protection.
 4. The server acquires the database write transaction before its final recheck. Within that transaction it confirms the ticket is open and owned by the cashier, validates item status and prices, checks payment and available stock, creates one sale and receipt number, records sale lines and payment, records stock movements, marks the ticket completed, and writes the successful-sale audit event.

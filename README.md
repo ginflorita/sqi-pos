@@ -10,7 +10,7 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 | --- | --- |
 | Products | Unique SKU, optional barcode, description, category, unit, product images, and price history |
 | Inventory | Opening stock, stock in/out, physical counts, adjustments, and movement history |
-| Checkout | Product search/barcode entry, saved tickets, quantities, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
+| Checkout | Product search/barcode entry with quantity confirmation before adding, saved tickets, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
 | Accounts | Named managers/cashiers, laptop approval, password confirmation for sensitive changes, and expiring sessions |
 | Bazaar days | Day 1, Day 2, etc., cashier shifts, opening/closing cash counts, and cash variance |
