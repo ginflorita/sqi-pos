@@ -53,6 +53,8 @@ You create the production manager credentials during setup. Setup must be comple
 
 Signed-in managers can add or edit products and photos without entering their password again. A reason is required only when changing an existing selling price. Product changes still record the manager, time, and changed details in the audit trail. Financial, stock, and account approvals retain password confirmation.
 
+Adding stock through **Stock in** or **Opening stock** needs no manual reason: a blank field records `Stock received` or `Opening stock` automatically. Stock-out, physical counts, and signed adjustments still require a reason.
+
 ![First-time POS setup](docs/screenshots/first-setup.png)
 
 ## Connect the second PC
@@ -103,7 +105,7 @@ After installing dependencies, run:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The recorded verification has **25 passing tests**, including concurrent checkout, last-unit stock competition, payment retries, catalog permissions and price-change reasons, returns, and restore. The browser recovery check also confirmed one sale, one payment, and one stock deduction after a simulated failed response. See the **[verification record](docs/verification.md)**.
+The recorded verification has **27 passing tests**, including concurrent checkout, last-unit stock competition, payment retries, catalog permissions, product/stock reason rules, returns, and restore. The browser recovery check also confirmed one sale, one payment, and one stock deduction after a simulated failed response. See the **[verification record](docs/verification.md)**.
 
 ## Optional demo
 

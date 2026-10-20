@@ -4,7 +4,7 @@ Updated: 2026-10-20 (Asia/Taipei). Release: 0.1. Test/demo data is separate from
 
 Run `python -m unittest discover -s tests -v`. Integration tests use isolated SQLite files in ignored `.test-runs/` directories and separate cookie sessions.
 
-Latest result: **25 tests passed** in 58.308 seconds. JavaScript syntax validation with `node --check static/app.js` also passed.
+Latest result: **27 tests passed** in 63.535 seconds. JavaScript syntax validation with `node --check static/app.js` also passed.
 
 ## Automated coverage
 
@@ -15,6 +15,7 @@ Latest result: **25 tests passed** in 58.308 seconds. JavaScript syntax validati
 - Cashier permissions, receipt ownership, CSRF, Origin, and trusted Host checks.
 - Stale cart versions and ticket ownership transfer.
 - Stock/refund idempotency, return limits, and explicit restocking.
+- Stock-in/opening stock accept omitted or blank reasons with automatic audit text; equivalent retries do not add stock twice and changed reasons cannot reuse a request key. Stock-out, physical counts, and signed adjustments still reject blank reasons.
 - Day 2 refunds leave Day 1 totals unchanged.
 - Failed checkout rolls back financial and inventory records together.
 - Historical database rows cannot be edited/deleted; negative stock is rejected.
@@ -38,6 +39,10 @@ Checked first-run setup, login, pending-laptop approval, product images/grid, sa
 On 2026-10-20, checked the simplified product forms in the separate demo workspace. Creating a product shows no reason or password field. Editing a product shows no password field; changing its selling price reveals the required reason field, and restoring the original price hides and disables that field. No sample price changes were saved during this check.
 
 ![Product editing without repeated password confirmation](screenshots/product-form.png)
+
+Also checked the stock movement form: **Stock in** and **Opening stock** label the reason optional and remove its browser-required flag. Switching to **Stock out** restores the required flag and explanation. The form describes the default audit text for each incoming movement. No stock was posted during this browser check.
+
+![Stock-in with an optional reason](screenshots/stock-reason.png)
 
 On 2026-10-20, a dedicated demo server deliberately replaced one successful checkout response with HTTP 503 **after the sale committed**. The browser displayed the failure and retained its payment request. Reloading automatically recovered receipt `BZ-001-000010`: total 150.00, paid 200.00, change 50.00. Database verification found exactly one sale, one payment, and one stock deduction for that ticket. The same session also verified manager closure of the previous demo drawer and opening a replacement-browser shift.
 

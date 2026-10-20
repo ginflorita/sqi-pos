@@ -555,10 +555,14 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     def stock_post():
         data = payload()
         reauth(data)
-        key, reason = request_key(data), text_field(data, 'reason', 300)
+        key = request_key(data)
         kind, lines = data.get('document_type'), data.get('lines')
         reference = text_field(data, 'reference_no', 80, True)
         require(kind in ('opening','in','out','count','adjustment'), 'Invalid stock document type.')
+        reason = text_field(data, 'reason', 300, optional=True)
+        if not reason:
+            require(kind in ('opening','in'), 'Add a reason for stock-out, counts, or adjustments.')
+            reason = 'Opening stock' if kind == 'opening' else 'Stock received'
         require(isinstance(lines, list) and 1 <= len(lines) <= 200, 'Enter 1–200 stock lines.')
         normalized = []
         for line in lines:

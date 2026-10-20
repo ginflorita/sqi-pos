@@ -30,7 +30,7 @@ class POSTest(unittest.TestCase):
         self.call('/setup',{'username':'owner','password':PASSWORD,'display_name':'Owner','bazaar_name':'Test Bazaar','timezone':'Asia/Manila','currency_code':'PHP'})
         self.category=self.call('/categories',{'name':'Handmade'}).json['category_id']
         self.product=self.call('/products',{'sku':'TEST-01','barcode':'12345678','description':'Test product','category_id':self.category,'unit':'pc','amount_minor':12550,'active':True}).json['product_id']
-        self.call('/stock',{'document_type':'opening','request_key':'opening-request-0001','reference_no':'TEST','reason':'Opening stock','manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':10}]})
+        self.call('/stock',{'document_type':'opening','request_key':'opening-request-0001','reference_no':'TEST','manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':10}]})
         self.call('/days/open',{'business_date':'2026-10-19','manager_password':PASSWORD})
         self.call('/shifts/open',{'opening_cash_minor':100000})
 
@@ -212,6 +212,34 @@ class POSTest(unittest.TestCase):
         self.assertEqual(a['sale_correction_id'],b['sale_correction_id'])
         self.call('/sales/'+str(sid)+'/corrections',{**correction,'request_key':'return-request-0002','lines':[{'sale_line_id':lid,'quantity':2,'restock_quantity':2}]},expected=409)
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM sale_corrections'),1)
+
+    def test_stock_in_defaults_reason_and_keeps_audit_and_retry_protection(self):
+        self.assertEqual(self.scalar('SELECT reason FROM stock_documents'),'Opening stock')
+        data={'document_type':'in','request_key':'stock-optional-reason-01','manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':5}]}
+        first=self.call('/stock',data).json
+        self.assertEqual(first,self.call('/stock',{**data,'reason':'   '}).json)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),15)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM stock_documents'),2)
+        self.assertEqual(self.scalar('SELECT reason FROM stock_documents ORDER BY stock_document_id DESC LIMIT 1'),'Stock received')
+        connection=connect(self.database)
+        try:
+            event=connection.execute("SELECT * FROM audit_events WHERE action='stock.posted' ORDER BY audit_event_id DESC LIMIT 1").fetchone()
+            self.assertEqual(event['reason'],'Stock received')
+            self.assertEqual(event['actor_user_id'],1)
+            self.assertIsNotNone(event['terminal_id'])
+        finally:connection.close()
+        self.call('/stock',{**data,'reason':'Different delivery'},expected=409)
+        self.call('/stock',{**data,'request_key':'stock-optional-reason-02','reason':'Supplier delivery'})
+        self.assertEqual(self.scalar('SELECT reason FROM stock_documents ORDER BY stock_document_id DESC LIMIT 1'),'Supplier delivery')
+
+    def test_stock_removals_counts_and_adjustments_still_need_reason(self):
+        for kind in ('out','count','adjustment'):
+            with self.subTest(kind=kind):
+                data={'document_type':kind,'request_key':'stock-reason-required-'+kind,'manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':1}]}
+                self.call('/stock',data,expected=400)
+                self.call('/stock',{**data,'reason':'   '},expected=400)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),10)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM stock_documents'),1)
 
     def test_day_two_refund_does_not_rewrite_day_one(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
