@@ -50,6 +50,10 @@ Fullscreen checkout browser checks passed in `.demo`: clicking Checkout from Tra
 
 ![Fullscreen checkout without the sidebar](screenshots/fullscreen-checkout.png)
 
+The standard sidebar now uses the supplied local SQI logo in place of the former B icon and bazaar wordmark, with the POS badge retained. Browser verification confirmed the logo loaded in the signed-in demo workspace and stayed within the sidebar; responsive CSS scales it for the compact sidebar. JavaScript syntax and whitespace checks passed. This branding-only change did not alter stock, sales, or tickets.
+
+![SQI company logo in the sidebar](screenshots/sqi-sidebar-logo.png)
+
 Product selection now opens **Choose quantity** for both product clicks and barcode Enter. Browser checks in `.demo` confirmed that product click/double-click followed by Cancel left ticket version 9 and its 19 update events unchanged. An excessive quantity (8 with 7 available) was blocked. Confirming qty 3 once added exactly 3 units and advanced the ticket to version 10 with 20 update events. Selecting the same barcode then showed 3 already in the order and 4 available; Escape made no additional cart change. The demo retained 10 sales and 184 stock units throughout. The confirmation button briefly ignores the opening double-click, and submissions in progress cannot be submitted again. JavaScript syntax and whitespace checks passed; no production data or sale was changed by these checks.
 
 ![Quantity confirmation before adding a product](screenshots/product-quantity.png)
