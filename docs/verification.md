@@ -24,7 +24,7 @@ Latest result: **27 tests passed** in 63.535 seconds. JavaScript syntax validati
 - Existing price changes require a nonblank reason; rejected changes roll back product details and price together.
 - Cashiers and anonymous browsers cannot write the catalog; stock and account actions retain password confirmation.
 - Login throttling, disabled-account sessions, and idle sessions despite background polling.
-- Receipt reprints create no new sale.
+- Receipt printing accepts omitted/blank reasons with the automatic `Customer copy` audit text and preserves user/laptop/time. Copies create no new sale, payment, or stock deduction; cashier receipt ownership still applies.
 - Report filters and Excel CSV formula protection.
 - Near-duplicate baskets require separate-purchase review.
 - Restore writes to a new directory, retains live data, and revokes copied sessions.
@@ -51,6 +51,10 @@ The logo header and compact company footer are inside the same receipt content u
 ![SQI acknowledgement receipt header](screenshots/sqi-receipt.png)
 
 ![SQI receipt totals and office hours](screenshots/sqi-receipt-footer.png)
+
+The direct-print update passed two focused regression tests in 2.814 seconds (`python -m unittest discover -s tests -k print -k cashier_roles -v`), plus JavaScript syntax and whitespace checks. In the demo browser, clicking **Print / save PDF** skipped the former reason form and recorded `receipt.print_requested` with `Customer copy` and actor/terminal attribution. The receipt remained visible after the print request. No physical printing was performed; printer output remains an equipment check.
+
+![Receipt after a direct print request without a reason form](screenshots/direct-print.png)
 
 On 2026-10-20, a dedicated demo server deliberately replaced one successful checkout response with HTTP 503 **after the sale committed**. The browser displayed the failure and retained its payment request. Reloading automatically recovered receipt `BZ-001-000010`: total 150.00, paid 200.00, change 50.00. Database verification found exactly one sale, one payment, and one stock deduction for that ticket. The same session also verified manager closure of the previous demo drawer and opening a replacement-browser shift.
 

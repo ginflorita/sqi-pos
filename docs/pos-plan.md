@@ -50,7 +50,7 @@ One ticket has one owner and laptop at a time, and each cashier can have one ope
 
 ## Receipts, corrections, and cash
 
-Receipts show a unique receipt number, bazaar day, host date/time, cashier, item descriptions, quantities, prices, discounts/tax if applicable, total, payment, and change. A printing failure does not create another sale. Reprinting uses the existing sale and records who reprinted it, when, and why. PDFs may be offered alongside printer output.
+Receipts show a unique receipt number, bazaar day, host date/time, cashier, item descriptions, quantities, prices, discounts/tax if applicable, total, payment, and change. A printing failure does not create another sale. Printing/reprinting uses the existing sale and records the user, laptop, time, and automatic reason `Customer copy`, without asking the cashier for a reason. PDFs may be offered alongside printer output.
 
 Completed sales and movements are not deleted or edited. Voids and returns create linked correction rows with reason, actor, and manager approval. Returned quantity cannot exceed the unreturned quantity on the original sale line. Restocking is explicit; a damaged return need not increase sellable stock. Refund payments appear on the day and shift when paid. Non-sale cash in/out movements also require a reason and approval.
 

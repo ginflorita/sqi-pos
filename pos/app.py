@@ -779,7 +779,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @signed_in()
     def reprint(sid):
         data = payload()
-        reason = text_field(data, 'reason', 300)
+        reason = text_field(data, 'reason', 300, optional=True) or 'Customer copy'
         with transaction(db()):
             sale = sale_access(sid)
             db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,reason,created_at) VALUES(?,'reprint','browser',?,?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],reason,now()))

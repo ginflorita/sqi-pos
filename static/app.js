@@ -242,7 +242,7 @@ document.addEventListener('click',async ev=>{
       'new-category':()=>formModal('Add a category',field('Category name','name','text','','required'),async data=>{await api('/categories','POST',data);closeModal();await renderCatalog();toast('Category added.');},'Add category'),
       'close-day':()=>managerAction('Close bazaar day','All shifts and open tickets must be closed. A backup runs after the day closes.','/days/close'),
       'backup':()=>managerAction('Create backup','Create and verify a snapshot of the live database, including product images.','/backups'),
-      'print-receipt':()=>formModal('Print or save this receipt',field('Reason','reason','text','Customer copy','required'),async data=>{await api('/sales/'+id+'/reprint','POST',data);await showReceipt(id);window.print();},'Continue to print'),
+      'print-receipt':async()=>{target.disabled=true;try{await api('/sales/'+id+'/reprint','POST',{});await showReceipt(id);window.print();}finally{target.disabled=false;}},
       'audit-details':()=>{const a=S.auditEvents.find(a=>a.audit_event_id===id);modal('Audit event #'+id,`<div class="stack"><p><strong>${e(a.action)}</strong> · ${e(timestamp(a.created_at))}</p><p>${e(a.reason||'')}</p><label class="field">Before<textarea readonly rows="5">${e(a.before_json?JSON.stringify(JSON.parse(a.before_json),null,2):'—')}</textarea></label><label class="field">After<textarea readonly rows="8">${e(a.after_json?JSON.stringify(JSON.parse(a.after_json),null,2):'—')}</textarea></label></div>`);}
     };
     if(actions[action])await actions[action]();

@@ -183,6 +183,8 @@ class POSTest(unittest.TestCase):
         self.call('/products',{},client=second,csrf=csrf,expected=403)
         self.assertEqual(second.get('/api/reports').status_code,403)
         self.assertEqual(second.get('/api/sales/'+str(sid)).status_code,403)
+        self.call('/sales/'+str(sid)+'/reprint',{},client=second,csrf=csrf,expected=403)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM receipt_events'),1)
         response=self.client.post('/api/tickets',json={})
         self.assertEqual(response.status_code,403)
         response=self.client.post('/api/tickets',json={},headers={'X-CSRF-Token':self.csrf,'Origin':'https://evil.example'})
@@ -298,9 +300,20 @@ class POSTest(unittest.TestCase):
 
     def test_print_failure_does_not_make_a_second_sale(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
+        self.call('/sales/'+str(sid)+'/reprint',{})
+        self.call('/sales/'+str(sid)+'/reprint',{'reason':'   '})
         self.call('/sales/'+str(sid)+'/reprint',{'reason':'Printer was disconnected'})
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),1)
-        self.assertEqual(self.scalar('SELECT COUNT(*) FROM receipt_events'),2)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM payments'),1)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM receipt_events'),4)
+        connection=connect(self.database)
+        try:
+            copies=connection.execute("SELECT * FROM receipt_events WHERE event_type='reprint' ORDER BY receipt_event_id").fetchall()
+            self.assertEqual([r['reason'] for r in copies],['Customer copy','Customer copy','Printer was disconnected'])
+            self.assertTrue(all(r['performed_by_user_id']==1 and r['terminal_id'] is not None and r['created_at'] for r in copies))
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM audit_events WHERE action='receipt.print_requested'").fetchone()[0],3)
+        finally:connection.close()
 
     def test_report_filters_and_csv_formula_safety(self):
         c=self.call('/categories',{'name':'=UNSAFE()'}).json['category_id']
