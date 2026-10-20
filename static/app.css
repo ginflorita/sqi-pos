@@ -55,4 +55,17 @@ body.checkout-fullscreen .shop-panel .product-grid{grid-template-columns:repeat(
 .sidebar .company-brand{padding:0 8px;justify-content:center;margin-bottom:24px}
 .sidebar .company-brand img{width:116px;max-width:100%;height:auto;object-fit:contain;background:white;border-radius:6px;padding:5px}
 @media(max-width:850px){.sidebar .company-brand{padding:0;margin-bottom:0;justify-content:center}.sidebar .company-brand img{width:46px;max-width:100%;padding:2px}}
+.cart-table{width:100%;table-layout:fixed;white-space:normal}
+.cart-table .cart-col-sku{width:30%}.cart-table .cart-col-description{width:16%}.cart-table .cart-col-quantity{width:28%}.cart-table .cart-col-total{width:26%}
+.cart-table th,.cart-table td{padding:8px 5px;vertical-align:middle}
+.cart-table th{position:sticky;top:0;z-index:1;font-size:10px;background:#f5f8ed}
+.cart-table .cart-row-sku{font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.cart-table .cart-row-total{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.cart-table .cart-quantity-cell{text-align:center}
+.cart-table .cart-view-description{min-height:28px;font-size:11px;padding:4px 7px}
+.cart-table .qty-control{margin:0;height:30px;border-radius:6px;vertical-align:middle}
+.cart-table .qty-control button{width:26px;height:28px;font-size:18px}
+.cart-table .qty-control span{min-width:24px;font-size:13px}
+.description-sku{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.product-description-text{font-size:17px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;margin:14px 0}.description-price{font-size:12px;color:var(--muted)}
+@media(max-width:460px){.cart-table th,.cart-table td{padding:8px 3px}.cart-table .cart-col-sku{width:28%}.cart-table .cart-col-quantity{width:30%}.cart-table .cart-row-sku,.cart-table .cart-row-total{font-size:12px}.cart-table .cart-view-description{font-size:10px;padding:3px 5px;min-height:26px}.cart-table .qty-control button{width:22px;height:26px}.cart-table .qty-control span{min-width:20px}.cart-table .qty-control{height:28px}}
 @media print{body>*{display:none!important}#modal-root{display:block!important}#modal-root .modal-overlay,#modal-root .modal,#modal-root .modal-body{display:block!important;position:static!important;background:white!important;max-height:none!important;overflow:visible!important;padding:0!important;margin:0!important;border:0!important;box-shadow:none!important;width:100%!important;backdrop-filter:none!important}#modal-root .modal-head,#modal-root .modal-actions,#modal-root .receipt-extra{display:none!important}.receipt-content{max-width:80mm;margin:0 auto;padding:3mm;font-size:10px}.receipt-content *{color:black!important}@page{margin:5mm}}

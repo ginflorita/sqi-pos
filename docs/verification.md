@@ -50,6 +50,12 @@ Fullscreen checkout browser checks passed in `.demo`: clicking Checkout from Tra
 
 ![Fullscreen checkout without the sidebar](screenshots/fullscreen-checkout.png)
 
+The current-order list now uses a text-only table with SKU, DESC/View, QTY controls, and TOTAL. Browser checks confirmed zero images in the order table and row heights of approximately 47 px for two sample SKUs. View for BAZ-008 opened the correct full description and unit price. The notebook +/− controls changed its quantity and amount to 2 / ₱300 and back to 1 / ₱150, restoring the ₱510 order total. These checks only changed an unpaid demo ticket; no sale was completed. JavaScript syntax and whitespace checks passed.
+
+![Compact text-only current-order table](screenshots/compact-order-table.png)
+
+![Full description opened from the order table](screenshots/order-description.png)
+
 The standard sidebar now uses the supplied local SQI logo in place of the former B icon and bazaar wordmark. The POS badge and bazaar-name / LOCAL WORKSPACE / currency box have been removed, leaving the logo centered above navigation. Browser verification confirmed the logo loaded in the signed-in demo workspace and the removed labels were absent; responsive CSS scales it for the compact sidebar. JavaScript syntax and whitespace checks passed. This branding-only change did not alter stock, sales, or tickets.
 
 ![SQI company logo in the sidebar](screenshots/sqi-sidebar-logo.png)
