@@ -1,49 +1,130 @@
-# Bazaar POS
+# SQI POS
 
-Version 0.1: a working local browser POS for two Windows laptops. Laptop 1 runs the Python server and SQLite database on its internal drive. Laptop 2 connects through the router using a browser. Checkout does not need internet.
+An offline browser POS for bazaars, with products, inventory, cash sales, acknowledgement receipts, and daily reporting. Two Windows PCs share one SQLite database through a local router. Internet is needed for initial dependency installation; checkout works over the local network.
 
-## Start on this laptop
+**Version:** 0.1 · **Server:** Python, Flask, Cheroot · **Database:** SQLite · **Interface:** HTML, CSS, JavaScript
 
-Run `Start-POS.cmd`, then open **http://localhost:8765**. On a new installation, run `Install-POS.cmd` first; installation needs internet and Python 3.11 or later. This development workspace already has the required runtime packages available.
+## Features
 
-First setup creates your manager account and records the bazaar name, currency, and timezone. There are no default production credentials. Then add categories/products, record opening stock, open Day 1, and open your cashier shift.
+| Area | Available in version 0.1 |
+| --- | --- |
+| Products | Unique SKU, optional barcode, description, category, unit, product images, and price history |
+| Inventory | Opening stock, stock in/out, physical counts, adjustments, and movement history |
+| Checkout | Product search/barcode entry, saved tickets, quantities, cash paid, calculated change, and acknowledgement receipts |
+| Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
+| Accounts | Named managers/cashiers, laptop approval, password confirmation for sensitive changes, and expiring sessions |
+| Bazaar days | Day 1, Day 2, etc., cashier shifts, opening/closing cash counts, and cash variance |
+| Corrections | Manager-approved returns/voids, explicit restocking, and cash in/out |
+| Reports | Business-date span, day, product, category, cashier, and laptop filters, with Excel-compatible CSV exports |
+| Audit and recovery | Append-only audit events, verified database backups, and restore into a new folder |
 
-For two laptops, follow [Operations and LAN setup](docs/operations.md). LAN mode requires a trusted local HTTPS certificate. Keep the host powered on and awake while either cashier is working.
+## Requirements
 
-## Available now
+- **Main PC:** Windows, Python 3.11 or later available as `python`, and a browser.
+- **Second PC:** A browser connected to the same router as the main PC.
+- **Network:** Private Wi-Fi or Ethernet; LAN mode uses HTTPS.
+- **Storage:** Keep the live database on the main PC's internal drive and configure a separate backup destination.
 
-- Named manager/cashier accounts, laptop approval, password hashing, expiring server sessions, request protection, and login throttling.
-- Product SKU/barcode/description/category/unit, versioned prices, and uploaded product images.
-- Opening stock, stock in/out, physical counts, signed adjustments, and an append-only inventory ledger.
-- Saved purchase tickets, ownership transfer, server-calculated cash totals/change, duplicate-submit protection, and near-duplicate warnings.
-- Acknowledgement receipts and audited print/PDF requests through the browser.
-- Manager-approved returns/voids, explicit restocking, cash in/out, shifts, cash variance, audited closure of an unavailable cashier's shift, and Day 1/Day 2 closing.
-- Sales reports by business-date span, day, product, category, cashier, and laptop, with Excel-compatible CSV exports.
-- Audit trail, verified online database backups, and a restore tool that writes into a new directory.
+## Install and start on the main PC
+
+Clone the repository, or download and extract its source. In PowerShell, open the project folder and run:
+
+```powershell
+git clone https://github.com/ginflorita/sqi-pos.git
+cd sqi-pos
+.\Install-POS.cmd
+.\Start-POS.cmd
+```
+
+If you already downloaded or cloned the project, start with `Install-POS.cmd` in its folder. Installation creates a `.venv` environment and downloads the dependencies. After installation, use `Start-POS.cmd` whenever starting the host.
+
+Open **http://localhost:8765** on the main PC. Keep the server running while either cashier is working.
+
+### First-time setup
+
+1. Create your manager account using a password of at least 12 characters.
+2. Enter the bazaar name and confirm its currency and timezone.
+3. Add categories, products, selling prices, and optional photos.
+4. Record opening stock in **Inventory**.
+5. Open the first bazaar day and your cashier shift, including opening cash.
+6. Add items, review payment, enter cash received, and confirm the sale.
+
+You create the production manager credentials during setup. Setup must be completed on the main PC.
+
+![First-time POS setup](docs/screenshots/first-setup.png)
+
+## Connect the second PC
+
+| Device | Responsibility |
+| --- | --- |
+| Main PC | Runs the server, holds the database, and can also operate a cashier browser |
+| Second PC | Opens the host's POS address in its browser and signs in with its own cashier account |
+
+Follow the **[Two-PC setup guide](docs/two-pc-setup.md)** to create and trust the local HTTPS certificate, allow the private-network connection through Windows Firewall, and approve the second laptop.
+
+After certificate setup, stop the existing server and start LAN mode:
+
+```powershell
+.\Start-POS.cmd --lan --cert certs/pos.crt --key certs/pos.key
+```
+
+The main PC uses `https://localhost:8765`; the second PC uses `https://<MAIN-PC-IP>:8765`. Replace the placeholder with the main PC's actual router-network address. Reserve that address in the router and keep the host awake and connected.
+
+## Daily operation
+
+1. The manager opens the numbered business day.
+2. Each cashier signs in and opens a shift with their own drawer's starting cash.
+3. Search or scan products, add quantities, review cash payment, and issue the saved sale's receipt.
+4. Use **Transactions** to review receipts and process manager-approved corrections.
+5. Complete, transfer, or cancel open orders, then count cash and close each shift.
+6. Review reports, close the business day, and check that its backup succeeded.
+
+After an uncertain payment response, refresh the same browser to check the existing ticket. It retrieves the original receipt when the sale committed. Use one ticket for each physical customer purchase.
+
+## Backups and restore
+
+Verified online backups run every 15 minutes while the server is running, at day close, and on request. The default folder is `backups/`. Set a separate drive or destination when starting the host:
+
+```powershell
+.\Start-POS.cmd --backup-dir E:\BazaarBackups
+```
+
+For LAN use, combine `--backup-dir` with the HTTPS flags. Backups include product images. The restore tool verifies a snapshot and restores into a new directory, preserving the original live data. Follow **[Operations](docs/operations.md)** for the full backup, restore, and laptop-recovery procedures.
+
+Live databases, backups, certificate files, environment files, and installed dependencies are excluded from Git.
+
+## Tests
+
+After installing dependencies, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+The recorded verification has **21 passing tests**, including concurrent checkout, last-unit stock competition, payment retries, permissions, returns, and restore. The browser recovery check also confirmed one sale, one payment, and one stock deduction after a simulated failed response. See the **[verification record](docs/verification.md)**.
+
+## Optional demo
+
+Create sample products and sales in a separate `.demo/` database:
+
+```powershell
+.\.venv\Scripts\python.exe tools\demo.py
+.\Start-POS.cmd --data-dir .demo --backup-dir .demo/backups --port 8766
+```
+
+Open **http://localhost:8766**. Demo credentials are `demo` / `Bazaar-demo-2026!`; they apply only to the sample workspace. A new demo browser still needs laptop approval; the recovery-approval tool is described in Operations. Sample data is kept separate from the production database.
 
 ## Current scope
 
-This version uses whole quantities, one active bazaar, one open ticket per cashier, separate cash drawers, and cash payments. Discounts and added tax are zero. Confirm the currency, tax treatment, receipt layout, and printer before real trading. Fractional units, non-cash payments, item imports, tax/discount configuration, and additional bazaar creation are future work.
+Version 0.1 supports cash payments, whole quantities, one active bazaar, one open ticket per cashier, and separate cash drawers. Discounts and added tax are zero. Fractional quantities, non-cash payments, catalog imports, tax/discount configuration, and additional bazaar creation remain planned.
 
-It has automated integration tests and a browser demonstration. The physical two-laptop router connection, printer, external backup destination, and power-loss rehearsal still need testing on the actual bazaar equipment. Local administrators can alter local files; the audit is not tamper-proof against host administrator access.
+Before real trading, confirm the bazaar's currency, tax treatment, receipt content, and printer layout, and test both physical PCs, the router, external backups, restore, and power interruption. The host is a single point of availability. Application audit rules do not prevent a host administrator from changing local files.
 
-## Documents
+## Documentation
 
-- [Two-PC setup guide](docs/two-pc-setup.md): connect the second cashier PC, configure HTTPS, and approve its account/laptop.
-- [POS plan](docs/pos-plan.md): workflows, business rules, reports, security, recovery, and acceptance criteria.
-- [Database schema](docs/database-schema.md): all 28 implemented tables, named IDs, relationships, and integrity rules.
-- [Operations](docs/operations.md): installation, LAN setup, daily use, backup, and restore.
-- [Verification](docs/verification.md): software checks and remaining equipment checks.
-- [Executable database schema](pos/schema.sql).
-
-Run tests with `python -m unittest discover -s tests -v`.
-
-## Separate demonstration
-
-`python tools/demo.py` creates an isolated `.demo/` workspace with sample products and illustrations. It never seeds the main `data/` database. Start it with:
-
-```powershell
-python run.py --data-dir .demo --backup-dir .demo/backups --port 8766
-```
-
-Demo sign-in: `demo` / `Bazaar-demo-2026!`. A new browser still needs laptop approval. The development preview browser has been approved in the sample database. These credentials apply only to `.demo/`.
+- [Two-PC setup](docs/two-pc-setup.md)
+- [Installation, daily operation, backup, and restore](docs/operations.md)
+- [POS plan and business rules](docs/pos-plan.md)
+- [Database schema: 28 tables with descriptive primary keys](docs/database-schema.md)
+- [Executable SQL schema](pos/schema.sql)
+- [Verification and remaining equipment checks](docs/verification.md)
