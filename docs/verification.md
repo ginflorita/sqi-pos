@@ -56,6 +56,10 @@ The current-order list now uses a text-only table with SKU, DESC/View, QTY contr
 
 ![Full description opened from the order table](screenshots/order-description.png)
 
+The final **Confirm payment?** dialog was checked against the separate demo ticket 11: total ₱510, cash ₱600, change ₱90. No, Escape, and the close button returned to the original payment form with ₱600 retained; after No/Escape the database still held 10 sales, 10 payments, and 184 stock units. Double-clicking Yes produced only one sale for that ticket, receipt `SQI-001-000011`, one additional payment, and the expected four-unit deduction (180 units remaining). Pending-payment storage and checkout submission occur only after Yes. Focus is contained in the top confirmation dialog. JavaScript syntax and whitespace checks passed; production data was not used for this test.
+
+![Yes/No confirmation before recording payment](screenshots/payment-yes-no.png)
+
 The standard sidebar now uses the supplied local SQI logo in place of the former B icon and bazaar wordmark. The POS badge and bazaar-name / LOCAL WORKSPACE / currency box have been removed, leaving the logo centered above navigation. Browser verification confirmed the logo loaded in the signed-in demo workspace and the removed labels were absent; responsive CSS scales it for the compact sidebar. JavaScript syntax and whitespace checks passed. This branding-only change did not alter stock, sales, or tickets.
 
 ![SQI company logo in the sidebar](screenshots/sqi-sidebar-logo.png)

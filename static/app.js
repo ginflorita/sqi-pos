@@ -29,7 +29,7 @@ const minor = value => {
 };
 const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toString(16).padStart(2,'0')).join('');
 const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:'checkout',products:[],categories:[],ticket:null,cart:[],search:'',category:'all',filters:{},online:true,paying:false,cartError:false};
-let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false;
+let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null;
 async function api(path, method='GET', data, isForm=false){
   let response;
   try { response=await fetch('/api'+path,{method,credentials:'same-origin',headers:{...(method!=='GET'?{'X-CSRF-Token':S.csrf}:{}),...(!isForm&&data?{'Content-Type':'application/json'}:{})},body:data?(isForm?data:JSON.stringify(data)):undefined}); }
@@ -49,12 +49,13 @@ function empty(title,description,action='',label=''){return `<div class="empty">
 function table(headers,rows){return `<div class="table-scroll"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;}
 function pill(text,style='success'){return `<span class="pill ${style}"><span class="dot"></span>${e(text)}</span>`;}
 function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">YOUR BAZAAR, IN ORDER</div><h1>${e(title)}</h1><p>${e(description)}</p></div><div class="actions">${actions}</div></div>`;}
-function modal(title,body,wide=false){$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
-function closeModal(){if(S.paying)return;$('#modal-root').innerHTML='';currentReceipt=null;}
+function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
+function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}$('#modal-root').innerHTML='';currentReceipt=null;}
 function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<form id="modal-form" class="form-grid">${body}<div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green">${submit}${icon('arrow')}</button></div></form>`,wide);$('#modal-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const submitButton=$('[type=submit]',form);if(submitButton.disabled)return;submitButton.disabled=true;$('.form-error',form).textContent='';try{await onSubmit(Object.fromEntries(new FormData(form)),form);}catch(error){$('.form-error',form).textContent=error.message;}finally{submitButton.disabled=false;}});}
 async function refreshState(){const data=await api('/state');Object.assign(S,data);return data;}
 async function loadCatalog(){const data=await api('/catalog');S.products=data.products;S.categories=data.categories;}
 function renderAuth(setup){
+  if(paymentConfirmationCancel)paymentConfirmationCancel();
   void exitCheckoutFullscreen();
   $('#modal-root').innerHTML='';
   $('#app').innerHTML=`<div class="auth"><aside class="auth-story"><div class="brand"><img src="/static/mark.svg" alt=""><span>bazaar.</span></div><div class="auth-title"><div class="eyebrow">A LITTLE LESS ADMIN. A LITTLE MORE</div><h1>Room for<br>the <em>good stuff.</em></h1><p>Your products, your people, and every little sale. All together at one counter.</p></div><div class="auth-foot"><span class="dot"></span>Made for your local network. Ready without internet.</div><div class="auth-circle"></div></aside><main class="auth-form"><div class="eyebrow">${setup?'LET’S SET UP YOUR COUNTER':'WELCOME BACK'}</div><h2>${setup?'Make it your bazaar.':'Your counter is waiting.'}</h2><p>${setup?'Create the manager account on this host laptop. You can add your second cashier after setup.':'Sign in with your own account to open your shift.'}</p><form id="auth-form" class="form-grid">${setup?field('Your name','display_name','text','','required autocomplete="name"')+field('Bazaar name','bazaar_name','text','','required maxlength="120"'):''}${field('Username','username','text','','required autocomplete="username" minlength="3" maxlength="50"')}${field('Password','password','password','','required autocomplete="'+(setup?'new-password':'current-password')+'" '+(setup?'minlength="12"':''))}${setup?selectField('Currency','currency_code',[['PHP','PHP · Philippine peso'],['USD','USD · US dollar'],['TWD','TWD · Taiwan dollar'],['SGD','SGD · Singapore dollar'],['EUR','EUR · Euro'],['GBP','GBP · British pound'],['MYR','MYR · Malaysian ringgit'],['THB','THB · Thai baht'],['HKD','HKD · Hong Kong dollar'],['AUD','AUD · Australian dollar']],'PHP')+field('Bazaar timezone','timezone','text','Asia/Manila','required'):`<div class="field full"><label for="f-terminal_name">Laptop name</label><input id="f-terminal_name" name="terminal_name" value="Cashier laptop" required maxlength="80"><small>A manager approves each new laptop before it can use the counter.</small></div>`}<div class="form-error" role="alert"></div><div class="field full"><button class="btn green" type="submit">${setup?'Create my counter':'Sign in'}${icon('arrow')}</button></div></form><div class="auth-note">${setup?'Use at least 12 characters for your password. Currency and timezone apply to this bazaar.':'Each sale stays connected to the person who made it.'}</div></main></div>`;
@@ -193,6 +194,24 @@ async function addProduct(pid,delta=1){
   cartQueue=cartQueue.then(async()=>{try{if(!S.cartError)S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id,'PUT',{version:S.ticket.version,lines:snapshot});}catch(error){S.cartError=true;toast(error.message+' Refresh the counter to recover the saved cart.',true);}finally{cartPending--;renderCart();}});
   await cartQueue;
 }
+function askPaymentConfirmation(total,paid,ticketNumber,retry=false){
+  return new Promise(resolve=>{
+    const original=$('#modal-root .modal-overlay'),overlay=document.createElement('div');
+    overlay.className='modal-overlay payment-confirm-overlay';
+    overlay.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="payment-confirm-title"><div class="modal-head"><h2 id="payment-confirm-title">Confirm payment?</h2><button type="button" class="icon-btn" aria-label="Close confirmation" data-payment-confirm="no">${icon('close')}</button></div><div class="modal-body"><p class="payment-confirm-ticket">${e(ticketNumber)}</p><dl class="payment-confirm-summary"><div><dt>Total amount</dt><dd>${money(total)}</dd></div><div><dt>Amount paid</dt><dd>${money(paid)}</dd></div><div><dt>Change due</dt><dd>${money(paid-total)}</dd></div></dl><p class="payment-confirm-note">${retry?'Check or retry the previously submitted payment using the same request.':'Have you received the cash and checked the change?'}</p><div class="modal-actions"><button type="button" class="btn light" data-payment-confirm="no">No</button><button type="button" class="btn green" data-payment-confirm="yes" disabled>Yes${icon('check')}</button></div></div></section>`;
+    original.hidden=true;$('#modal-root').appendChild(overlay);
+    let settled=false;
+    const finish=confirmed=>{
+      if(settled)return;settled=true;paymentConfirmationCancel=null;overlay.remove();original.hidden=false;
+      if(!confirmed&&original.isConnected)$('#amount-paid',original)?.focus({preventScroll:true});
+      resolve(confirmed);
+    };
+    paymentConfirmationCancel=()=>finish(false);
+    overlay.addEventListener('click',ev=>{const choice=ev.target.closest('[data-payment-confirm]');if(choice&&!choice.disabled)finish(choice.dataset.paymentConfirm==='yes');});
+    const yes=$('[data-payment-confirm=yes]',overlay);setTimeout(()=>{if(overlay.isConnected)yes.disabled=false;},250);
+    $('.modal-actions [data-payment-confirm=no]',overlay).focus({preventScroll:true});
+  });
+}
 async function paymentModal(){
   await cartQueue;if(S.cartError)throw new Error('Refresh the counter to recover the saved cart.');
   const q=await api('/tickets/'+S.ticket.purchase_ticket_id);S.ticket=q;
@@ -205,10 +224,11 @@ async function paymentModal(){
   if(q.duplicate_warning){const warning=document.createElement('div');warning.className='notice field full';warning.innerHTML=`<label class="check-field"><input id="duplicate-reviewed" type="checkbox" required ${pending?.duplicate_reviewed?'checked':''}><span>A matching order (${e(receiptNumber(q.duplicate_warning.receipt_number))}) was saved in the last two minutes. I checked that this is a separate customer purchase.</span></label>`;$('#payment-form').prepend(warning);}
   $('#amount-paid').addEventListener('input',()=>{try{$('#change-due').textContent=money(Math.max(0,minor($('#amount-paid').value)-total));}catch{$('#change-due').textContent='—';}});
   $('#payment-form').addEventListener('submit',async ev=>{
-    ev.preventDefault();const form=ev.currentTarget,b=$('[type=submit]',form);b.disabled=true;$('.form-error',form).textContent='';
+    ev.preventDefault();const form=ev.currentTarget,b=$('[type=submit]',form);if(b.disabled)return;b.disabled=true;$('.form-error',form).textContent='';
     try{
       const amount=minor($('#amount-paid').value);requireClient(amount>=total,'The amount paid is less than the total.');
       const body=pending||{request_key:key(),purchase_ticket_id:q.purchase_ticket_id,version:q.version,quote_hash:q.quote_hash,tendered_minor:amount,duplicate_reviewed:!!$('#duplicate-reviewed')?.checked};
+      if(!await askPaymentConfirmation(total,body.tendered_minor,q.ticket_number,!!pending))return;
       localStorage.setItem(pendingKey,JSON.stringify(body));pending=body;S.paying=true;
       const result=await api('/checkout','POST',body);localStorage.removeItem(pendingKey);S.paying=false;S.ticket=null;S.cart=[];
       await renderCheckout();await showReceipt(result.sale_id);toast(result.replayed?'Retrieved the existing sale.':'Payment saved. The order is complete.');
@@ -341,6 +361,6 @@ document.addEventListener('click',async ev=>{
   }catch(error){toast(error.message,true);}
 });
 document.addEventListener('change',async ev=>{if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;await navigate(S.page);}});
-document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void exitCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$('.modal'));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
+document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void exitCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$$('.modal').at(-1));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
 setInterval(async()=>{if(pollBusy||S.paying||document.hidden)return;pollBusy=true;try{const old=JSON.stringify([S.user?.user_id,S.terminal?.approved,S.day?.bazaar_day_id,S.shift?.shift_id]);const result=await refreshState();const next=JSON.stringify([result.user?.user_id,result.terminal?.approved,result.day?.bazaar_day_id,result.shift?.shift_id]);if(old!==next&&!$('.modal'))await boot();}catch{}finally{pollBusy=false;}},20000);
 boot();
