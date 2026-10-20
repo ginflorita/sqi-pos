@@ -4,6 +4,7 @@ const $$ = (s, root=document) => [...root.querySelectorAll(s)];
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const e = escapeHTML;
 const paths = {
+ expand:'M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5', collapse:'M3 8h5V3M21 8h-5V3M16 21v-5h5M8 21v-5H3',
  cart:'M3 3h2l2 12h12l2-8H6M9 20h.01M18 20h.01', grid:'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',
  box:'m3 7 9-4 9 4v10l-9 4-9-4zm0 0 9 4 9-4M12 11v10M7 5l10 4', receipt:'M5 3h14v18l-3-2-4 2-4-2-3 2zm4 5h6M9 12h6M9 16h3',
  chart:'M4 20V4M4 20h17M9 16v-4M14 16V8M19 16V5', users:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.9M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
@@ -28,7 +29,7 @@ const minor = value => {
 };
 const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toString(16).padStart(2,'0')).join('');
 const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:'checkout',products:[],categories:[],ticket:null,cart:[],search:'',category:'all',filters:{},online:true,paying:false,cartError:false};
-let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false;
+let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false;
 async function api(path, method='GET', data, isForm=false){
   let response;
   try { response=await fetch('/api'+path,{method,credentials:'same-origin',headers:{...(method!=='GET'?{'X-CSRF-Token':S.csrf}:{}),...(!isForm&&data?{'Content-Type':'application/json'}:{})},body:data?(isForm?data:JSON.stringify(data)):undefined}); }
@@ -54,11 +55,12 @@ function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<f
 async function refreshState(){const data=await api('/state');Object.assign(S,data);return data;}
 async function loadCatalog(){const data=await api('/catalog');S.products=data.products;S.categories=data.categories;}
 function renderAuth(setup){
+  void exitCheckoutFullscreen();
   $('#modal-root').innerHTML='';
   $('#app').innerHTML=`<div class="auth"><aside class="auth-story"><div class="brand"><img src="/static/mark.svg" alt=""><span>bazaar.</span></div><div class="auth-title"><div class="eyebrow">A LITTLE LESS ADMIN. A LITTLE MORE</div><h1>Room for<br>the <em>good stuff.</em></h1><p>Your products, your people, and every little sale. All together at one counter.</p></div><div class="auth-foot"><span class="dot"></span>Made for your local network. Ready without internet.</div><div class="auth-circle"></div></aside><main class="auth-form"><div class="eyebrow">${setup?'LET’S SET UP YOUR COUNTER':'WELCOME BACK'}</div><h2>${setup?'Make it your bazaar.':'Your counter is waiting.'}</h2><p>${setup?'Create the manager account on this host laptop. You can add your second cashier after setup.':'Sign in with your own account to open your shift.'}</p><form id="auth-form" class="form-grid">${setup?field('Your name','display_name','text','','required autocomplete="name"')+field('Bazaar name','bazaar_name','text','','required maxlength="120"'):''}${field('Username','username','text','','required autocomplete="username" minlength="3" maxlength="50"')}${field('Password','password','password','','required autocomplete="'+(setup?'new-password':'current-password')+'" '+(setup?'minlength="12"':''))}${setup?selectField('Currency','currency_code',[['PHP','PHP · Philippine peso'],['USD','USD · US dollar'],['TWD','TWD · Taiwan dollar'],['SGD','SGD · Singapore dollar'],['EUR','EUR · Euro'],['GBP','GBP · British pound'],['MYR','MYR · Malaysian ringgit'],['THB','THB · Thai baht'],['HKD','HKD · Hong Kong dollar'],['AUD','AUD · Australian dollar']],'PHP')+field('Bazaar timezone','timezone','text','Asia/Manila','required'):`<div class="field full"><label for="f-terminal_name">Laptop name</label><input id="f-terminal_name" name="terminal_name" value="Cashier laptop" required maxlength="80"><small>A manager approves each new laptop before it can use the counter.</small></div>`}<div class="form-error" role="alert"></div><div class="field full"><button class="btn green" type="submit">${setup?'Create my counter':'Sign in'}${icon('arrow')}</button></div></form><div class="auth-note">${setup?'Use at least 12 characters for your password. Currency and timezone apply to this bazaar.':'Each sale stays connected to the person who made it.'}</div></main></div>`;
   $('#auth-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const b=$('[type=submit]',form);b.disabled=true;$('.form-error',form).textContent='';try{await api(setup?'/setup':'/login','POST',Object.fromEntries(new FormData(form)));await boot();}catch(error){$('.form-error',form).textContent=error.message;}finally{b.disabled=false;}});
 }
-function renderPending(){ $('#app').innerHTML=`<div class="auth"><aside class="auth-story"><div class="brand"><img src="/static/mark.svg" alt=""><span>bazaar.</span></div><div class="auth-title"><h1>A place at<br>the <em>counter.</em></h1></div></aside><main class="auth-form"><div class="eyebrow">LAPTOP APPROVAL</div><h2>One quick check.</h2><p>You’re signed in as ${e(S.user.display_name)}. Ask your manager to approve “${e(S.terminal.name)}” from Team & laptops on the host.</p>${button('Check approval','boot','green','refresh')} ${button('Sign out','logout','light')}</main></div>`;}
+function renderPending(){void exitCheckoutFullscreen(); $('#app').innerHTML=`<div class="auth"><aside class="auth-story"><div class="brand"><img src="/static/mark.svg" alt=""><span>bazaar.</span></div><div class="auth-title"><h1>A place at<br>the <em>counter.</em></h1></div></aside><main class="auth-form"><div class="eyebrow">LAPTOP APPROVAL</div><h2>One quick check.</h2><p>You’re signed in as ${e(S.user.display_name)}. Ask your manager to approve “${e(S.terminal.name)}” from Team & laptops on the host.</p>${button('Check approval','boot','green','refresh')} ${button('Sign out','logout','light')}</main></div>`;}
 const nav=[['checkout','cart','Checkout'],['catalog','grid','Products'],['inventory','box','Inventory'],['transactions','receipt','Transactions'],['reports','chart','Reports'],['shifts','clock','Cashier shifts'],['team','users','Team & laptops'],['audit','shield','Audit trail'],['settings','settings','Settings']];
 function shell(){
   const allowed=nav.filter(([id])=>S.user.role==='manager'||['checkout','transactions','shifts'].includes(id));
@@ -67,10 +69,37 @@ function shell(){
 }
 async function boot(){try{await cartQueue;await refreshState();if(!S.user)return renderAuth(S.setup_required);if(!S.terminal.approved)return renderPending();await loadCatalog();shell();await navigate(S.page);}catch(error){toast(error.message,true);if(!S.user)renderAuth(false);}}
 async function navigate(page){
+  if(page!=='checkout')await exitCheckoutFullscreen();
   S.page=page;$$('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));$('#page-name').textContent=nav.find(n=>n[0]===page)?.[2]||page;
   const renderers={checkout:renderCheckout,catalog:renderCatalog,inventory:renderInventory,transactions:renderTransactions,reports:renderReports,shifts:renderShifts,team:renderTeam,audit:renderAudit,settings:renderSettings};
   try{await renderers[page]();}catch(error){toast(error.message,true);$('#page').innerHTML=empty('Unable to open this page',error.message);}
 }
+function syncCheckoutFullscreen(){
+  document.body.classList.toggle('checkout-fullscreen',checkoutFullscreen);
+  const control=$('[data-action=toggle-checkout-fullscreen]');
+  if(control){control.innerHTML=icon(checkoutFullscreen?'collapse':'expand')+(checkoutFullscreen?'Exit fullscreen':'Fullscreen');control.setAttribute('aria-pressed',String(checkoutFullscreen));control.title=checkoutFullscreen?'Exit fullscreen (Esc)':'Open checkout fullscreen';}
+}
+async function enterCheckoutFullscreen(){
+  checkoutFullscreen=true;syncCheckoutFullscreen();
+  if(!document.fullscreenElement&&document.documentElement.requestFullscreen){
+    browserFullscreenOwned=true;
+    try{await document.documentElement.requestFullscreen();}catch{browserFullscreenOwned=false;}
+  }
+}
+async function exitCheckoutFullscreen(){
+  checkoutFullscreen=false;syncCheckoutFullscreen();
+  if(browserFullscreenOwned){browserFullscreenOwned=false;if(document.fullscreenElement)try{await document.exitFullscreen();}catch{}}
+}
+function checkoutModePrompt(){
+  if($('.modal')||S.paying)return;
+  modal('Open checkout',`<p>Choose how to open your counter. Fullscreen hides the sidebar and workspace header so products and the current order have more room.</p><div class="modal-actions checkout-mode-actions">${button('Cancel','close-modal','light')}${button('Standard view','checkout-standard','light')}${button('Open fullscreen','checkout-fullscreen','green','expand')}</div>`);
+}
+async function openCheckoutMode(fullscreen){
+  closeModal();
+  if(fullscreen)await enterCheckoutFullscreen();else await exitCheckoutFullscreen();
+  await cartQueue;await navigate('checkout');
+}
+document.addEventListener('fullscreenchange',()=>{if(browserFullscreenOwned&&!document.fullscreenElement){browserFullscreenOwned=false;checkoutFullscreen=false;syncCheckoutFullscreen();}});
 function gate(){
   if(!S.day)return `<div class="notice">${icon('sun')}<div><strong>A fresh day starts here.</strong><br>A manager needs to open the bazaar day before checkout.</div>${S.user.role==='manager'?`<div class="actions">${button('Open a day','open-day','green','plus')}</div>`:''}</div>`;
   if(!S.shift)return `<div class="notice">${icon('clock')}<div><strong>Ready for your first sale?</strong><br>Open your shift and record the cash in your drawer.</div><div class="actions">${button('Open my shift','open-shift','green','plus')}</div></div>`;
@@ -91,7 +120,7 @@ async function renderCheckout(){
   if(tickets.tickets.length){S.ticket=await api('/tickets/'+tickets.tickets[0].purchase_ticket_id);S.cart=S.ticket.lines.map(l=>({product_id:l.product_id,quantity:l.quantity}));}
   else{S.ticket=null;S.cart=[];}
   S.cartError=false;
-  $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions">${button('Refresh stock','refresh-catalog','light','refresh')}</div></div>`+gate()+`<div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Search products, SKU or scan barcode…" aria-label="Search products" value="${e(S.search)}" autocomplete="off"><kbd>/</kbd></div></div><div class="category-tabs" id="category-tabs"></div><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-grid" id="product-grid"></div><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
+  $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions">${button('Refresh stock','refresh-catalog','light','refresh')}${button(checkoutFullscreen?'Exit fullscreen':'Fullscreen','toggle-checkout-fullscreen','light',checkoutFullscreen?'collapse':'expand',`aria-pressed="${checkoutFullscreen}"`)}</div></div>`+gate()+`<div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Search products, SKU or scan barcode…" aria-label="Search products" value="${e(S.search)}" autocomplete="off"><kbd>/</kbd></div></div><div class="category-tabs" id="category-tabs"></div><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-grid" id="product-grid"></div><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
   $('#product-search').addEventListener('input',ev=>{S.search=ev.target.value;renderProducts();});
   $('#product-search').addEventListener('keydown',ev=>{if(ev.key==='Enter'){ev.preventDefault();const matches=S.products.filter(p=>p.active&&(p.sku.toLowerCase()===S.search.toLowerCase()||p.barcode===S.search));if(matches.length===1)productQuantityModal(matches[0].product_id).catch(err=>toast(err.message,true));}});
   renderCategories();renderProducts();renderCart();
@@ -281,7 +310,7 @@ function managerAction(title,description,path){formModal(title,`<div class="fiel
 document.addEventListener('click',async ev=>{
   const target=ev.target.closest('button,[data-page],[data-category]');if(!target)return;
   try{
-    if(target.dataset.page){if(S.paying)return;await cartQueue;return await navigate(target.dataset.page);}
+    if(target.dataset.page){if(S.paying)return;await cartQueue;if(target.dataset.page==='checkout')return checkoutModePrompt();return await navigate(target.dataset.page);}
     if(target.dataset.category){S.category=target.dataset.category;renderCategories();renderProducts();return;}
     if(target.dataset.add){await productQuantityModal(Number(target.dataset.add));return;}
     if(target.dataset.qty){await addProduct(Number(target.dataset.qty),Number(target.dataset.delta));return;}
@@ -289,6 +318,7 @@ document.addEventListener('click',async ev=>{
     const action=target.dataset.action;if(!action)return;
     const id=Number(target.dataset.id);
     const actions={
+      'checkout-standard':()=>openCheckoutMode(false),'checkout-fullscreen':()=>openCheckoutMode(true),'toggle-checkout-fullscreen':()=>checkoutFullscreen?exitCheckoutFullscreen():enterCheckoutFullscreen(),
       'close-modal':closeModal,'boot':boot,'open-day':openDay,'open-shift':openShift,'close-shift':closeShift,'pay':paymentModal,
       'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'new-product':()=>productForm(),'edit-product':()=>productForm(id),'new-stock':stockForm,'cash-movement':cashMovement,
       'new-user':()=>userForm(),'edit-user':()=>userForm(id),'manage-terminal':()=>terminalForm(target),'manager-close-shift':()=>managerCloseShift(id),
@@ -306,6 +336,6 @@ document.addEventListener('click',async ev=>{
   }catch(error){toast(error.message,true);}
 });
 document.addEventListener('change',async ev=>{if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;await navigate(S.page);}});
-document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){closeModal();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$('.modal'));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
+document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void exitCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$('.modal'));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
 setInterval(async()=>{if(pollBusy||S.paying||document.hidden)return;pollBusy=true;try{const old=JSON.stringify([S.user?.user_id,S.terminal?.approved,S.day?.bazaar_day_id,S.shift?.shift_id]);const result=await refreshState();const next=JSON.stringify([result.user?.user_id,result.terminal?.approved,result.day?.bazaar_day_id,result.shift?.shift_id]);if(old!==next&&!$('.modal'))await boot();}catch{}finally{pollBusy=false;}},20000);
 boot();

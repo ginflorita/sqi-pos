@@ -36,6 +36,12 @@ The owner must allow inbound TCP port 8765 for Python on the Windows Private net
 
 Create the second cashier in Team & laptops. Sign in on Laptop 2 and name it. The host manager approves the pending laptop. Unapproved laptops cannot access the catalog or checkout. Clearing cookies or switching profiles requires approval again. Only one shift per cashier and laptop may be open.
 
+## Checkout fullscreen
+
+Click **Checkout** in the sidebar to choose **Open fullscreen** or **Standard view**. Cancel, the close button, or Escape dismisses this choice without leaving the current section. Checkout also has a **Fullscreen** button beside **Refresh stock**.
+
+Fullscreen hides the sidebar and workspace header, giving products and Current order the full page. Use **Exit fullscreen** or Escape to restore navigation. Refresh stock keeps the selected view and saved order. The app requests browser fullscreen when supported; if the browser declines, the expanded checkout layout still works. Leaving Checkout or signing out restores the standard layout. Reloading the browser starts in the standard view.
+
 ## Daily workflow
 
 1. The manager opens Day 1, Day 2, etc. with the business date. The date must follow the prior day. It remains open across midnight until explicitly closed.

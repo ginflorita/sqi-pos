@@ -44,6 +44,12 @@ The checkout heading now uses one compact row for **The counter**, its subtitle,
 
 ![Compact single-row checkout heading](screenshots/compact-checkout-heading.png)
 
+Fullscreen checkout browser checks passed in `.demo`: clicking Checkout from Transactions opened a choice; closing it kept Transactions visible; Standard view retained navigation. Both the checkout Fullscreen button and the choice's Open fullscreen entered the expanded view with sidebar/header hidden and the existing four-unit ₱510 order preserved. Exit fullscreen and Escape restored navigation. Refresh stock retained fullscreen and the order. Browser fullscreen expanded the tested viewport to the display size. JavaScript syntax and whitespace checks passed. This frontend-only update did not submit a sale or stock movement.
+
+![Checkout display-mode choice](screenshots/checkout-mode-choice.png)
+
+![Fullscreen checkout without the sidebar](screenshots/fullscreen-checkout.png)
+
 Product selection now opens **Choose quantity** for both product clicks and barcode Enter. Browser checks in `.demo` confirmed that product click/double-click followed by Cancel left ticket version 9 and its 19 update events unchanged. An excessive quantity (8 with 7 available) was blocked. Confirming qty 3 once added exactly 3 units and advanced the ticket to version 10 with 20 update events. Selecting the same barcode then showed 3 already in the order and 4 available; Escape made no additional cart change. The demo retained 10 sales and 184 stock units throughout. The confirmation button briefly ignores the opening double-click, and submissions in progress cannot be submitted again. JavaScript syntax and whitespace checks passed; no production data or sale was changed by these checks.
 
 ![Quantity confirmation before adding a product](screenshots/product-quantity.png)

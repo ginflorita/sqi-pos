@@ -43,4 +43,13 @@
 @media(min-width:1500px){.shop-panel .product-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:1000px){.checkout-layout{grid-template-columns:minmax(0,1fr)}.cart{grid-row:1;position:static;height:auto;min-height:0}.cart-lines{min-height:100px;max-height:320px;flex:none}.shop-panel .product-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:460px){.cart-header,.cart-summary{padding:16px}.cart-ticket{padding:10px 16px}.cart-lines{padding:2px 16px}.cart-line{grid-template-columns:42px minmax(0,1fr);gap:10px}.cart-line .cart-thumb{width:42px;height:48px}.cart-line>strong{grid-column:2;font-size:16px}.cart-summary .sum-row.total strong{font-size:32px}.cart-line h3{font-size:15px}.shop-panel .product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.checkout-mode-actions{flex-wrap:wrap}
+body.checkout-fullscreen .shell{grid-template-columns:minmax(0,1fr)}
+body.checkout-fullscreen .sidebar,body.checkout-fullscreen .topbar{display:none}
+body.checkout-fullscreen .page{padding:22px 24px}
+body.checkout-fullscreen .cart{height:min(800px,calc(100dvh - 100px))}
+body.checkout-fullscreen .shop-panel .product-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+@media(min-width:1700px){body.checkout-fullscreen .shop-panel .product-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:1000px){body.checkout-fullscreen .cart{height:auto}}
+@media(max-width:660px){body.checkout-fullscreen .page{padding:16px}.checkout-heading{gap:10px}.checkout-heading .actions{gap:6px}.checkout-heading .btn{font-size:10px;padding:8px}.checkout-heading [data-action=refresh-catalog]{font-size:0;gap:0}.checkout-heading [data-action=refresh-catalog] .icon{width:18px;height:18px}.checkout-mode-actions .btn{flex:1}body.checkout-fullscreen .shop-panel .product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media print{body>*{display:none!important}#modal-root{display:block!important}#modal-root .modal-overlay,#modal-root .modal,#modal-root .modal-body{display:block!important;position:static!important;background:white!important;max-height:none!important;overflow:visible!important;padding:0!important;margin:0!important;border:0!important;box-shadow:none!important;width:100%!important;backdrop-filter:none!important}#modal-root .modal-head,#modal-root .modal-actions,#modal-root .receipt-extra{display:none!important}.receipt-content{max-width:80mm;margin:0 auto;padding:3mm;font-size:10px}.receipt-content *{color:black!important}@page{margin:5mm}}
