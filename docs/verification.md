@@ -119,3 +119,9 @@ Fractional quantities, non-cash payments, tax/discount configuration, catalog im
 - Demo UI: Settings shows the printer setup panel and controls; [screenshot](screenshots/printer-settings.png).
 - Host update: verified database snapshot before restart; existing sales, payments, stock movements, products and stock totals matched after restart. Host health responded HTTP 200. No production sale or stock adjustment was used as a test.
 - Physical USB output, margins, long receipt pagination and cutting require the user's eventual printer. Automatic printing remains off until administrator setup.
+
+## Product photo viewer — 2026-10-20
+
+Product photos in Browse products now open a large modal with the full uncropped image, SKU and description. Photo viewing is a separate button from quantity selection, remains available on out-of-stock products, and never adds an order line. Product details and + continue to open the quantity confirmation. Thumbnails use contain sizing so the whole photo is visible.
+
+Verified in the isolated demo: open photo, close viewer, open quantity selection, cancel; current order remained empty. JavaScript syntax and diff checks passed. [Viewer screenshot](screenshots/product-photo-viewer.png). No production data changes or server restart required.
