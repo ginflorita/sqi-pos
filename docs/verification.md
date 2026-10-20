@@ -50,7 +50,7 @@ Fullscreen checkout browser checks passed in `.demo`: clicking Checkout from Tra
 
 ![Fullscreen checkout without the sidebar](screenshots/fullscreen-checkout.png)
 
-The standard sidebar now uses the supplied local SQI logo in place of the former B icon and bazaar wordmark, with the POS badge retained. Browser verification confirmed the logo loaded in the signed-in demo workspace and stayed within the sidebar; responsive CSS scales it for the compact sidebar. JavaScript syntax and whitespace checks passed. This branding-only change did not alter stock, sales, or tickets.
+The standard sidebar now uses the supplied local SQI logo in place of the former B icon and bazaar wordmark. The POS badge and bazaar-name / LOCAL WORKSPACE / currency box have been removed, leaving the logo centered above navigation. Browser verification confirmed the logo loaded in the signed-in demo workspace and the removed labels were absent; responsive CSS scales it for the compact sidebar. JavaScript syntax and whitespace checks passed. This branding-only change did not alter stock, sales, or tickets.
 
 ![SQI company logo in the sidebar](screenshots/sqi-sidebar-logo.png)
 
