@@ -763,8 +763,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             event('sale.completed', 'sales', sid, day=s['bazaar_day_id'], after={'total_minor':q['total_minor'],'receipt_number':number})
             printer = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=? AND enabled=1', (g.terminal['terminal_id'],)).fetchone()
             if printer:
-                print_job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,requested_by_user_id,created_at)
-                    VALUES(?,?,'automatic',?,?,?,?)''', (sid,g.terminal['terminal_id'],printer['printer_name'],printer['paper_width_mm'],g.user['user_id'],stamp)).lastrowid
+                print_job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,paper_size,requested_by_user_id,created_at)
+                    VALUES(?,?,'automatic',?,?,?,?,?)''', (sid,g.terminal['terminal_id'],printer['printer_name'],printer['paper_width_mm'],printer['paper_size'],g.user['user_id'],stamp)).lastrowid
                 event('receipt.automatic_queued', 'receipt_print_jobs', print_job, after={'sale_id':sid,'printer_name':printer['printer_name']})
         return jsonify(sale_id=sid, replayed=False)
 

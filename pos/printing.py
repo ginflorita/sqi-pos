@@ -1,8 +1,12 @@
 """Per-terminal printing. Helpers pull jobs; no browser-to-localhost exception needed."""
 import base64
 import io
+import ipaddress
 import json
+import os
 import secrets
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
@@ -10,19 +14,39 @@ from flask import g, jsonify, request
 from .db import digest, now, transaction as raw_transaction
 
 
-def receipt_image(db, sale_id, width_mm):
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def launch_print_helper(config_path):
+    """Start the Windows helper without leaving a console window open."""
+    log_path = config_path.parent / 'helper.log'
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open('a', encoding='utf-8') as log:
+        subprocess.Popen(
+            [sys.executable, str(ROOT / 'tools' / 'print_agent.py'), '--config', str(config_path)],
+            cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), close_fds=True,
+        )
+
+
+def receipt_image(db, sale_id, paper_size):
     sale = db.execute('''SELECT s.*,u.display_name,d.business_date FROM sales s
         JOIN users u ON u.user_id=s.cashier_user_id JOIN bazaar_days d USING(bazaar_day_id)
         WHERE sale_id=?''', (sale_id,)).fetchone()
     payment = db.execute("SELECT * FROM payments WHERE sale_id=? AND direction='in'", (sale_id,)).fetchone()
     lines = db.execute('SELECT * FROM sale_lines WHERE sale_id=? ORDER BY sale_line_id', (sale_id,)).fetchall()
-    width = 384 if width_mm == 58 else 576
+    if isinstance(paper_size, int):
+        paper_size = 'roll_58' if paper_size == 58 else 'roll_80'
+    is_58 = paper_size == 'roll_58'
+    # Letter paper keeps the exact 80 mm receipt artwork. The Windows adapter
+    # centers it at its physical 80 mm width instead of stretching it.
+    width = 384 if is_58 else 576
     font = None
     font_path = None
     for path in ('C:/Windows/Fonts/arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'):
         if Path(path).exists():
             font_path = path
-            font = ImageFont.truetype(path, 20 if width_mm == 58 else 23)
+            font = ImageFont.truetype(path, 20 if is_58 else 23)
             break
     font = font or ImageFont.load_default(size=20)
     rows = []
@@ -37,16 +61,16 @@ def receipt_image(db, sale_id, width_mm):
         rows.append(line)
     def amount(n):
         return f'PHP {n / 100:,.2f}'
-    add("SQI Group Int'l. Corp - Philippines")
+    add("SQI Group Int'l Corp - Philippines")
     add('ACKNOWLEDGEMENT RECEIPT')
     add(sale['receipt_number'].replace('BZ-', 'SQI-', 1))
     add('Date: ' + sale['business_date'])
     add('Cashier: ' + sale['display_name'])
-    add('-' * (27 if width_mm == 58 else 39))
+    add('-' * (27 if is_58 else 39))
     for line in lines:
         add(line['sku_snapshot'] + ' ' + line['description_snapshot'])
         add(f"{line['quantity']} x {amount(line['unit_price_minor'])} = {amount(line['line_total_minor'])}")
-    add('-' * (27 if width_mm == 58 else 39))
+    add('-' * (27 if is_58 else 39))
     add('TOTAL: ' + amount(sale['total_minor']))
     add('Cash paid: ' + amount(payment['tendered_minor']))
     add('Change: ' + amount(payment['change_minor']))
@@ -55,23 +79,28 @@ def receipt_image(db, sale_id, width_mm):
     logo = Image.open(Path(__file__).resolve().parent.parent / 'static/sqi-logo.png').convert('RGBA')
     logo.thumbnail((180, 100))
     step = 30
-    image = Image.new('RGB', (width, 125 + step * len(rows) + 100), 'white')
+    top = 120
+    inset = 14
+    image = Image.new('RGB', (width, top + 5 + step * len(rows) + 100), 'white')
     image.paste(logo, ((width - logo.width) // 2, 8), logo)
     draw = ImageDraw.Draw(image)
     for i, row in enumerate(rows):
-        draw.text((14, 120 + i * step), row, font=font, fill='black')
-    footer_font = ImageFont.truetype(font_path, 12 if width_mm == 58 else 17) if font_path else font
-    footer_y = 125 + step * len(rows)
+        draw.text((inset, top + i * step), row, font=font, fill='black')
+    footer_font = ImageFont.truetype(font_path, 12 if is_58 else 17) if font_path else font
+    footer_y = top + 5 + step * len(rows)
     for offset, pair in enumerate((('Tel: 8-364-7561','Website: https://sqigroup.ph'),
                                    ('Office Hours: 9:00 AM – 6:00 PM','Monday – Saturday'))):
         for column, text in enumerate(pair):
-            draw.text((14 + column * (width // 2), footer_y + offset * 28), text, font=footer_font, fill='black')
+            draw.text((inset + column * (width // 2), footer_y + offset * 28), text, font=footer_font, fill='black')
     output = io.BytesIO()
     image.save(output, 'PNG')
     return output.getvalue()
 
 
 def register_printing(app, db, transaction, signed_in, require, payload, integer, text_field, event, sale_access):
+    app.config.setdefault('PRINT_HELPER_CONFIG', str(ROOT / '.print-helper' / 'config.json'))
+    app.config.setdefault('PRINT_HELPER_LAUNCHER', launch_print_helper)
+
     def public_setting(row):
         if not row:
             return None
@@ -100,6 +129,37 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
             WHERE j.terminal_id=? AND (? IS NULL OR j.sale_id=?) ORDER BY receipt_print_job_id DESC LIMIT 15''', (g.terminal['terminal_id'],sid,sid)).fetchall()
         return jsonify(printer=public_setting(row), jobs=[dict(j) for j in jobs])
 
+    @app.post('/api/receipt-printer/start-helper')
+    @signed_in()
+    def start_helper():
+        try:
+            local_request = ipaddress.ip_address(request.remote_addr or '').is_loopback
+        except ValueError:
+            local_request = False
+        require(local_request, 'Open Checkout on the POS host laptop to start its printer helper.', 409)
+        require(os.name == 'nt' or app.config.get('TESTING'), 'The receipt printer helper requires Windows.', 409)
+        row = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=?', (g.terminal['terminal_id'],)).fetchone()
+        require(row, 'A manager must pair the print helper on this laptop first.', 409)
+        if public_setting(row)['online']:
+            return jsonify(status='online', message='Receipt printer is already connected.')
+        config_path = Path(app.config['PRINT_HELPER_CONFIG']).resolve()
+        require(config_path.is_file(), 'The saved print helper setup was not found. Ask a manager to pair this laptop once.', 409)
+        try:
+            config = json.loads(config_path.read_text(encoding='utf-8'))
+            token = config.get('token', '') if isinstance(config, dict) else ''
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            require(False, 'The saved print helper setup is damaged. Ask a manager to pair this laptop again.', 409)
+        require(isinstance(token, str) and secrets.compare_digest(digest(token), row['token_hash']),
+                'The saved print helper pairing does not match this laptop. Ask a manager to pair it again.', 409)
+        try:
+            app.config['PRINT_HELPER_LAUNCHER'](config_path)
+        except OSError:
+            app.logger.exception('Could not start receipt print helper')
+            require(False, 'Windows could not start the print helper. Ask a manager to check helper.log.', 409)
+        with transaction(db()):
+            event('printer.helper_started', 'terminals', g.terminal['terminal_id'])
+        return jsonify(status='starting', message='Starting the receipt printer in the background.')
+
     @app.post('/api/receipt-printer/pair')
     @signed_in(True)
     def pair():
@@ -120,8 +180,12 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
     def settings_put():
         data = payload()
         name = text_field(data, 'printer_name', 200, optional=True)
-        width = integer(data, 'paper_width_mm', 58, 80)
-        require(width in (58,80), 'Choose 58 mm or 80 mm paper.')
+        paper_size = data.get('paper_size')
+        if paper_size is None:
+            width = integer(data, 'paper_width_mm', 58, 80)
+            paper_size = 'roll_58' if width == 58 else 'roll_80'
+        require(paper_size in ('roll_58','roll_80','letter'), 'Choose 58 mm, 80 mm, or Letter paper.')
+        width = 58 if paper_size == 'roll_58' else 80
         require(type(data.get('enabled')) is bool, 'Invalid automatic printing option.')
         with transaction(db()):
             row = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=?', (g.terminal['terminal_id'],)).fetchone()
@@ -130,9 +194,9 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
                 require(public_setting(row)['online'], 'Start this laptop\'s print helper first.', 409)
                 require(name in json.loads(row['available_printers_json']), 'Choose a printer detected on this laptop.', 409)
                 require(not any(v in name.lower() for v in ('pdf','xps','onenote','fax')), 'Choose a physical receipt printer; virtual printers may open a file dialog.')
-            db().execute('UPDATE receipt_printers SET printer_name=?,paper_width_mm=?,enabled=?,configured_by_user_id=?,updated_at=? WHERE terminal_id=?',
-                         (name,width,int(data['enabled']),g.user['user_id'],now(),g.terminal['terminal_id']))
-            event('printer.configured','terminals',g.terminal['terminal_id'],after={'printer_name':name,'paper_width_mm':width,'enabled':data['enabled']})
+            db().execute('UPDATE receipt_printers SET printer_name=?,paper_width_mm=?,paper_size=?,enabled=?,configured_by_user_id=?,updated_at=? WHERE terminal_id=?',
+                         (name,width,paper_size,int(data['enabled']),g.user['user_id'],now(),g.terminal['terminal_id']))
+            event('printer.configured','terminals',g.terminal['terminal_id'],after={'printer_name':name,'paper_size':paper_size,'enabled':data['enabled']})
         return jsonify(ok=True)
 
     @app.post('/api/sales/<int:sid>/printer-copy')
@@ -144,8 +208,8 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
             require(row, 'An administrator must set up this laptop\'s printer first.', 409)
             pending = db().execute("SELECT 1 FROM receipt_print_jobs WHERE sale_id=? AND status IN ('queued','claimed')", (sid,)).fetchone()
             require(not pending, 'This receipt already has a pending print job. Check print history before making a copy.', 409)
-            job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,requested_by_user_id,created_at)
-                VALUES(?,?,'copy',?,?,?,?)''', (sid,g.terminal['terminal_id'],row['printer_name'],row['paper_width_mm'],g.user['user_id'],now())).lastrowid
+            job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,paper_size,requested_by_user_id,created_at)
+                VALUES(?,?,'copy',?,?,?,?,?)''', (sid,g.terminal['terminal_id'],row['printer_name'],row['paper_width_mm'],row['paper_size'],g.user['user_id'],now())).lastrowid
             db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,reason,created_at) VALUES(?,'reprint','windows',?,?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],'Requested another printer copy',now()))
             event('receipt.copy_queued','receipt_print_jobs',job,after={'sale_id':sid})
         return jsonify(ok=True)
@@ -179,12 +243,13 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
         if not job:
             return jsonify(job=None)
         try:
-            image = receipt_image(db(),job['sale_id'],job['paper_width_mm'])
+            image = receipt_image(db(),job['sale_id'],job['paper_size'])
         except Exception:
             db().execute("UPDATE receipt_print_jobs SET status='failed',error_message='Receipt rendering failed',finished_at=? WHERE receipt_print_job_id=?", (now(),job['receipt_print_job_id']))
             raise
         return jsonify(job={'receipt_print_job_id':job['receipt_print_job_id'],'printer_name':job['printer_name'],
-                            'paper_width_mm':job['paper_width_mm'],'image_base64':base64.b64encode(image).decode()})
+                            'paper_width_mm':job['paper_width_mm'],'paper_size':job['paper_size'],
+                            'image_base64':base64.b64encode(image).decode()})
 
     @app.post('/api/print-agent/result')
     def result():

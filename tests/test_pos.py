@@ -338,6 +338,34 @@ class POSTest(unittest.TestCase):
         self.call('/receipt-printer/pair',{})
         self.assertEqual(poll().status_code,403)  # Re-pair revokes the old token.
 
+    def test_cashier_can_start_saved_print_helper_without_manager_password(self):
+        token=self.call('/receipt-printer/pair',{}).json['pairing_token']
+        config=self.folder/'print-helper.json'
+        config.write_text(json.dumps({'url':'http://localhost:8765','token':token,'certificate':''}),encoding='utf-8')
+        launched=[]
+        self.app.config['PRINT_HELPER_CONFIG']=str(config)
+        self.app.config['PRINT_HELPER_LAUNCHER']=lambda path:launched.append(path)
+        db=connect(self.database)
+        try:db.execute("UPDATE users SET role='cashier' WHERE username='owner'")
+        finally:db.close()
+        response=self.call('/receipt-printer/start-helper',{})
+        self.assertEqual(response.json['status'],'starting')
+        self.assertEqual(launched,[config.resolve()])
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM audit_events WHERE action='printer.helper_started'"),1)
+
+    def test_letter_paper_is_saved_and_snapshotted_for_automatic_printing(self):
+        token=self.call('/receipt-printer/pair',{}).json['pairing_token']
+        agent=self.app.test_client()
+        agent.post('/api/print-agent/poll',json={'printers':['Office Laser']},headers={'Authorization':'Bearer '+token})
+        self.call('/receipt-printer',{'printer_name':'Office Laser','paper_size':'letter','enabled':True},'PUT')
+        sale=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
+        job=agent.post('/api/print-agent/poll',json={'printers':['Office Laser']},headers={'Authorization':'Bearer '+token}).json['job']
+        self.assertEqual(job['paper_size'],'letter')
+        import base64
+        image=Image.open(io.BytesIO(base64.b64decode(job['image_base64'])))
+        self.assertEqual(image.width,576)  # Letter keeps the 80 mm receipt artwork.
+        self.assertEqual(self.scalar(f"SELECT COUNT(*) FROM receipt_print_jobs WHERE sale_id={sale} AND paper_size='letter'"),1)
+
     def test_print_failure_does_not_make_a_second_sale(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
         self.call('/sales/'+str(sid)+'/reprint',{})

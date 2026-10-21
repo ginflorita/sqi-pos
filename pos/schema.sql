@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS receipt_printers (
  terminal_id INTEGER NOT NULL UNIQUE REFERENCES terminals(terminal_id),
  token_hash TEXT NOT NULL UNIQUE, printer_name TEXT NOT NULL DEFAULT '',
  paper_width_mm INTEGER NOT NULL DEFAULT 80 CHECK(paper_width_mm IN (58,80)),
+ paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter')),
  enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
  available_printers_json TEXT NOT NULL DEFAULT '[]', last_seen_at TEXT,
  configured_by_user_id INTEGER NOT NULL REFERENCES users(user_id), updated_at TEXT NOT NULL
@@ -199,9 +200,10 @@ CREATE TABLE IF NOT EXISTS receipt_print_jobs (
  terminal_id INTEGER NOT NULL REFERENCES terminals(terminal_id),
  job_kind TEXT NOT NULL CHECK(job_kind IN ('automatic','copy')),
  printer_name TEXT NOT NULL, paper_width_mm INTEGER NOT NULL CHECK(paper_width_mm IN (58,80)),
+ paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter')),
  status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','claimed','submitted','failed')),
  requested_by_user_id INTEGER NOT NULL REFERENCES users(user_id),
  created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT, error_message TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_automatic_print_per_sale ON receipt_print_jobs(sale_id) WHERE job_kind='automatic';
-PRAGMA user_version=1;
+PRAGMA user_version=2;

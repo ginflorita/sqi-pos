@@ -14,6 +14,16 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def remove_temporary_receipt(path):
+    """Best-effort cleanup; a brief Windows/spooler lock must not fail a print."""
+    for _ in range(10):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.2)
+
+
 def powershell(*args):
     result = subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
                              '-File',str(ROOT/'tools/print_windows.ps1'),*args],
@@ -31,6 +41,20 @@ def main():
     args = parser.parse_args()
     if os.name != 'nt':
         parser.error('The receipt print helper requires Windows.')
+    # Hold this lock for the process lifetime. Repeated cashier clicks then
+    # cannot create helpers that compete for the same print job.
+    import msvcrt
+    args.config.parent.mkdir(parents=True, exist_ok=True)
+    lock = (args.config.parent / 'agent.lock').open('a+b')
+    if lock.seek(0, 2) == 0:
+        lock.write(b'0')
+        lock.flush()
+    lock.seek(0)
+    try:
+        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        print('SQI print helper is already running.')
+        return
     if args.setup or not args.config.exists():
         url = input('POS address (same address used in this laptop browser): ').strip().rstrip('/')
         parts = urlsplit(url)
@@ -73,10 +97,15 @@ def main():
                 try:
                     if job['printer_name'] not in printers:
                         raise RuntimeError('Saved printer is not installed. Check printer settings.')
-                    with tempfile.TemporaryDirectory(prefix='sqi-receipt-') as folder:
-                        image = Path(folder)/'receipt.png'
+                    handle, filename = tempfile.mkstemp(prefix='sqi-receipt-', suffix='.png')
+                    os.close(handle)
+                    image = Path(filename)
+                    try:
                         image.write_bytes(base64.b64decode(job['image_base64'],validate=True))
-                        powershell('-Mode','print','-Printer',job['printer_name'],'-ImagePath',str(image),'-WidthMm',str(job['paper_width_mm']))
+                        paper_size = job.get('paper_size') or ('roll_58' if job['paper_width_mm'] == 58 else 'roll_80')
+                        powershell('-Mode','print','-Printer',job['printer_name'],'-ImagePath',str(image),'-PaperSize',paper_size)
+                    finally:
+                        remove_temporary_receipt(image)
                     print('Receipt sent to Windows printer queue.')
                 except Exception as error:
                     result.update(status='failed',error_message=('Check printer before making a copy: '+str(error))[:300])

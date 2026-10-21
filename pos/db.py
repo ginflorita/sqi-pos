@@ -27,9 +27,13 @@ def connect(path):
 def initialize(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
-        if db.execute('PRAGMA user_version').fetchone()[0] not in (0, 1):
+        schema_version = db.execute('PRAGMA user_version').fetchone()[0]
+        if schema_version not in (0, 1, 2):
             raise RuntimeError('Unsupported database version. Restore the matching application.')
         db.execute('PRAGMA journal_mode=WAL')
+        if schema_version == 1:
+            db.execute("ALTER TABLE receipt_printers ADD COLUMN paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter'))")
+            db.execute("ALTER TABLE receipt_print_jobs ADD COLUMN paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter'))")
         db.executescript(Path(__file__).with_name('schema.sql').read_text(encoding='utf-8'))
         db.execute('INSERT OR IGNORE INTO system_settings(system_setting_id,instance_key,created_at) VALUES(1,?,?)',
                    (secrets.token_hex(24),now()))

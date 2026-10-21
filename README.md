@@ -146,4 +146,4 @@ Before real trading, confirm the bazaar's currency, tax treatment, receipt conte
 
 ## Receipt printers on each cashier laptop
 
-For remembered USB printers and automatic printing after payment confirmation, follow [printer setup](docs/printer-setup.md). An administrator configures each laptop in Settings and runs `Start-Print-Helper.cmd` locally. Automatic printing stays off until setup; browser printing remains available. Physical printer output must be verified when hardware is available.
+For remembered USB printers and automatic printing after payment confirmation, follow [printer setup](docs/printer-setup.md). A manager performs the one-time pairing and printer selection. On the POS host, a cashier can then start an offline helper from **Connect printer** in Checkout without a Windows Administrator prompt. Automatic printing stays off until setup; browser printing remains available. Physical printer output must be verified when hardware is available.
