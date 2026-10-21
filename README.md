@@ -64,7 +64,7 @@ You create the production manager credentials during setup. Setup must be comple
 
 Signed-in managers can add or edit products and photos without entering their password again. A reason is required only when changing an existing selling price. Product changes still record the manager, time, and changed details in the audit trail. Financial, stock, and account approvals retain password confirmation.
 
-For a large product list, open **Products → Bulk upload** and choose an `.xlsx` workbook containing `ITEM CODE` and `DESCRIPTION` headers. Only those two columns are imported. Repeated and existing SKUs are skipped. Imported rows are saved under **Uploaded products** with image, category, price, and quantity blank. No immediate setup is required. Use **Update** whenever you are ready to add selling details; the item stays out of checkout until then.
+For a large product list, open **Products → Add from Excel** and choose an `.xlsx` workbook containing `ITEM CODE` and `DESCRIPTION` headers. Only those two columns are imported. Select **Add & save all** to save every valid row at once; repeated and existing SKUs are skipped. Imported rows remain under **Products saved for later** with image, category, price, and quantity blank. Use **Set up** whenever you are ready to add selling details; the item stays out of checkout until then.
 
 Adding stock through **Stock in** or **Opening stock** needs no manual reason: a blank field records `Stock received` or `Opening stock` automatically. Stock-out, physical counts, and signed adjustments still require a reason.
 
