@@ -420,9 +420,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             event('category.created', 'categories', cid, after={'name': name})
         return jsonify(category_id=cid)
 
-    @app.post('/api/products/import')
-    @signed_in(True)
-    def product_import():
+    def uploaded_product_workbook():
         upload = request.files.get('workbook')
         require(upload and upload.filename, 'Choose an Excel .xlsx workbook.')
         filename = re.split(r'[\\/]', upload.filename)[-1].strip()
@@ -430,6 +428,25 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         raw = upload.read(6 * 1024 * 1024 + 1)
         require(raw and len(raw) <= 6 * 1024 * 1024, 'The workbook must be 6 MB or smaller.')
         sheet, rows, rejected, duplicate_rows = product_rows_from_workbook(raw)
+        return filename, sheet, rows, rejected, duplicate_rows
+
+    @app.post('/api/products/import/preview')
+    @signed_in(True)
+    def product_import_preview():
+        filename, sheet, rows, rejected, duplicate_rows = uploaded_product_workbook()
+        existing_skus = {row['sku'].casefold() for row in db().execute(
+            'SELECT sku FROM products UNION ALL SELECT sku FROM product_import_drafts')}
+        products = [{'sku': sku, 'description': description, 'row': row_number}
+                    for sku, description, row_number in rows if sku.casefold() not in existing_skus]
+        existing = len(rows) - len(products)
+        return jsonify(filename=filename, sheet=sheet, products=products, ready=len(products),
+                       existing=existing, duplicate_rows=duplicate_rows, rejected_rows=len(rejected),
+                       rejected=rejected[:20])
+
+    @app.post('/api/products/import')
+    @signed_in(True)
+    def product_import():
+        filename, sheet, rows, rejected, duplicate_rows = uploaded_product_workbook()
         imported = 0
         existing = 0
         with transaction(db()):
@@ -462,6 +479,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                   text_field(data, 'description', 200), integer(data, 'category_id', 1), text_field(data, 'unit', 20)]
         require(type(data.get('active', True)) is bool, 'Invalid product status.')
         amount = integer(data, 'amount_minor', 1)
+        opening_quantity = integer(data, 'quantity', 0, 1_000_000) if product_id is None and 'quantity' in data else 0
+        stock_request_key = request_key(data) if opening_quantity else None
         with transaction(db()):
             require(db().execute('SELECT 1 FROM categories WHERE category_id=? AND active=1', (fields[3],)).fetchone(), 'Choose an active category.')
             draft = None
@@ -493,8 +512,34 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             event('product.updated' if before else 'product.created', 'products', product_id, before=before,
                   after={**dict(zip(('sku','barcode','description','category_id','unit'), fields)),
                          'active': data.get('active', True), 'amount_minor': amount,
-                         'import_draft_id': draft_id},
+                         'import_draft_id': draft_id, 'opening_quantity': opening_quantity},
                   reason=reason, approved=g.user['user_id'])
+            if opening_quantity:
+                bazaar = active_bazaar()
+                day = db().execute("SELECT * FROM bazaar_days WHERE status='open'").fetchone()
+                day_id = day['bazaar_day_id'] if day else None
+                stamp = now()
+                stock_reason = 'Opening stock'
+                normalized = [{'product_id': product_id, 'quantity': opening_quantity}]
+                request_hash = digest(json.dumps(['opening', normalized, stock_reason, 'Product setup'], sort_keys=True))
+                stock_document_id = db().execute('''INSERT INTO stock_documents
+                    (bazaar_id,bazaar_day_id,document_type,reference_no,reason,request_key,status,
+                     created_by_user_id,approved_by_user_id,created_at,approved_at)
+                    VALUES(?,?,?,?,?,?,'posted',?,?,?,?)''',
+                    (bazaar['bazaar_id'], day_id, 'opening', 'Product setup', stock_reason,
+                     stock_request_key, g.user['user_id'], g.user['user_id'], stamp, stamp)).lastrowid
+                stock_line_id = db().execute('''INSERT INTO stock_document_lines
+                    (stock_document_id,product_id,quantity_change,expected_quantity,counted_quantity)
+                    VALUES(?,?,?,?,?)''',
+                    (stock_document_id, product_id, opening_quantity, None, None)).lastrowid
+                db().execute('''INSERT INTO stock_movements
+                    (bazaar_id,bazaar_day_id,product_id,quantity_change,stock_document_line_id,created_by_user_id,created_at)
+                    VALUES(?,?,?,?,?,?,?)''',
+                    (bazaar['bazaar_id'], day_id, product_id, opening_quantity, stock_line_id,
+                     g.user['user_id'], stamp))
+                event('stock.posted', 'stock_documents', stock_document_id, day=day_id,
+                      after={'document_type': 'opening', 'lines': normalized, 'request_hash': request_hash},
+                      reason=stock_reason, approved=g.user['user_id'])
         return jsonify(product_id=product_id)
 
     @app.post('/api/products/<int:product_id>/image')

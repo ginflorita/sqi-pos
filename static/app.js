@@ -29,7 +29,7 @@ const minor = value => {
 };
 const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toString(16).padStart(2,'0')).join('');
 const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:'checkout',products:[],productDrafts:[],categories:[],ticket:null,cart:[],search:'',category:'all',filters:{},online:true,paying:false,cartError:false,receiptPrinter:null};
-let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null;
+let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, pendingProductImport=null;
 async function api(path, method='GET', data, isForm=false){
   let response;
   try { response=await fetch('/api'+path,{method,credentials:'same-origin',headers:{...(method!=='GET'?{'X-CSRF-Token':S.csrf}:{}),...(!isForm&&data?{'Content-Type':'application/json'}:{})},body:data?(isForm?data:JSON.stringify(data)):undefined}); }
@@ -52,7 +52,7 @@ function table(headers,rows){return `<div class="table-scroll"><table><thead><tr
 function pill(text,style='success'){return `<span class="pill ${style}"><span class="dot"></span>${e(text)}</span>`;}
 function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>${e(title)}</h1><p>${e(description)}</p></div><div class="actions">${actions}</div></div>`;}
 function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
-function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}$('#modal-root').innerHTML='';currentReceipt=null;}
+function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;}
 function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<form id="modal-form" class="form-grid">${body}<div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green">${submit}${icon('arrow')}</button></div></form>`,wide);$('#modal-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const submitButton=$('[type=submit]',form);if(submitButton.disabled)return;submitButton.disabled=true;$('.form-error',form).textContent='';try{await onSubmit(Object.fromEntries(new FormData(form)),form);}catch(error){$('.form-error',form).textContent=error.message;}finally{submitButton.disabled=false;}});}
 async function refreshState(){const data=await api('/state');Object.assign(S,data);return data;}
 async function loadCatalog(){const data=await api('/catalog');S.products=data.products;S.productDrafts=data.drafts||[];S.categories=data.categories;}
@@ -292,24 +292,39 @@ function openShift(){formModal('Open your cashier shift',`<div class="field full
 async function cancelTicket(){await cartQueue;if(!S.ticket)return;formModal('Cancel this order',`<div class="field full"><small>This cancels the open ticket. Completed sales use a manager-approved correction.</small></div>`+field('Reason','reason','text','','required'),async data=>{await api('/tickets/'+S.ticket.purchase_ticket_id+'/cancel','POST',{reason:data.reason,version:S.ticket.version});closeModal();S.ticket=null;S.cart=[];await renderCheckout();toast('Order cancelled.');},'Cancel order');}
 async function transferTicket(){await cartQueue;if(!S.ticket)return;const {users}=await api('/filters');formModal('Transfer this order',selectField('Receiving cashier','target_user_id',users.filter(u=>u.user_id!==S.user.user_id).map(u=>[u.user_id,u.display_name]))+field('Reason','reason','text','','required')+`<div class="field full"><small>The receiving cashier must have an open shift and no current order. They can refresh their counter to retrieve this ticket.</small></div>`,async data=>{await api('/tickets/'+S.ticket.purchase_ticket_id+'/transfer','POST',{version:S.ticket.version,target_user_id:Number(data.target_user_id),reason:data.reason});closeModal();S.ticket=null;S.cart=[];await renderCheckout();toast('Order transferred. The receiving cashier can refresh their counter.');},'Transfer order');}
 function productImportForm(){
-  formModal('Add products from Excel',`<div class="notice field full">All valid ITEM CODE and DESCRIPTION rows will be added and saved. You can set up image, category, price, and quantity later. Products without selling details stay out of checkout.</div><div class="field full"><label for="f-workbook">Excel workbook</label><input id="f-workbook" name="workbook" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required><small>Use an .xlsx file up to 6 MB. Repeated and existing SKUs are skipped.</small></div>`,async(data,form)=>{
-    const upload=new FormData();upload.append('workbook',$('[name=workbook]',form).files[0]);
+  pendingProductImport=null;
+  formModal('Add products from Excel',`<div class="notice field full">First upload the workbook to review its valid ITEM CODE and DESCRIPTION rows. Nothing is saved until you select Save all, set up later above the uploaded list.</div><div class="field full"><label for="f-workbook">Excel workbook</label><input id="f-workbook" name="workbook" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required><small>Use an .xlsx file up to 6 MB. Repeated and existing SKUs are skipped.</small></div>`,async(data,form)=>{
+    const file=$('[name=workbook]',form).files[0],upload=new FormData();upload.append('workbook',file);
+    const result=await api('/products/import/preview','POST',upload,true);
+    pendingProductImport={file,preview:result};
+    const skipped=result.existing+result.duplicate_rows+result.rejected_rows;
+    const summary=`${result.ready} new product${result.ready===1?'':'s'} ready${skipped?` · ${skipped} row${skipped===1?'':'s'} skipped`:''}`;
+    modal('Uploaded products',`<div class="panel-title"><div><h2>${e(summary)}</h2><span class="muted">Review this list before saving</span></div><div class="actions">${button('Choose another file','bulk-upload-products','light','refresh')}${button('Save all, set up later','save-product-import','green','check',result.ready?'':'disabled')}</div></div>${result.products.length?table(['Excel row','SKU','Description'],result.products.map(p=>`<tr><td>${p.row}</td><td><strong>${e(p.sku)}</strong></td><td>${e(p.description)}</td></tr>`)):empty('No new products to save','Every valid SKU in this workbook already exists or was skipped.')}`,true);
+  },'Show uploaded products',true);
+}
+async function savePendingProductImport(control){
+  if(!pendingProductImport)return;
+  control.disabled=true;
+  try{
+    const upload=new FormData();upload.append('workbook',pendingProductImport.file);
     const result=await api('/products/import','POST',upload,true);
-    closeModal();await loadCatalog();await navigate('catalog');
+    pendingProductImport=null;closeModal();await loadCatalog();await navigate('catalog');
     const skipped=result.existing+result.duplicate_rows+result.rejected_rows;
     toast(`${result.imported} product${result.imported===1?'':'s'} saved for later${skipped?`. ${skipped} row${skipped===1?' was':'s were'} skipped.`:'.'}`);
-  },'Add & save all',true);
+  }finally{control.disabled=false;}
 }
 async function productForm(pid,draftId){
   await loadCatalog();const p=S.products.find(p=>p.product_id===pid),draft=S.productDrafts.find(d=>d.product_import_draft_id===draftId);
   if(draftId&&!draft)throw new Error('This imported product is no longer available.');
   if(!S.categories.length){formModal('Create your first category',field('Category name','name','text','','required'),async data=>{await api('/categories','POST',data);closeModal();await productForm(pid,draftId);},'Create category');return;}
   const categoryOptions=(draft?[['','Choose category']]:[]).concat(S.categories.filter(c=>c.active).map(c=>[c.category_id,c.name]));
-  formModal(p?'Edit product':draft?'Update uploaded product':'Add a product',field('SKU','sku','text',p?.sku||draft?.sku||'','required maxlength="60"')+field('Barcode (optional)','barcode','text',p?.barcode||'','maxlength="80"')+`<div class="field full"><label for="f-description">Product description</label><input id="f-description" name="description" value="${e(p?.description||draft?.description||'')}" required maxlength="200"></div>`+selectField('Category','category_id',categoryOptions,p?.category_id)+field('Unit','unit','text',p?.unit||(draft?'':'pc'),'required maxlength="20"')+field('Selling price','price','text',p?(p.amount_minor/100).toFixed(2):'','required inputmode="decimal"')+selectField('Availability','active',[['true','Active'],['false','Inactive']],String(p?!!p.active:true))+`<div class="field full"><label for="f-image">Product photo (optional)</label><input id="f-image" name="image" type="file" accept="image/jpeg,image/png,image/webp"><small>JPEG, PNG, or WebP. Up to 5 MB and 12 megapixels.</small></div>`+(p?`<div class="field full" id="price-change-reason" hidden><label for="f-reason">Reason for price change</label><input id="f-reason" name="reason" maxlength="300" placeholder="For example, supplier cost changed" disabled><small>Required only when changing an existing selling price.</small></div>`:''),async(data,form)=>{
-    const result=await api(p?'/products/'+pid:'/products',p?'PUT':'POST',{...data,draft_id:draftId,category_id:Number(data.category_id),active:data.active==='true',amount_minor:minor(data.price)});
+  formModal(p?'Edit product':draft?'Update uploaded product':'Add a product',field('SKU','sku','text',p?.sku||draft?.sku||'','required maxlength="60"')+field('Barcode (optional)','barcode','text',p?.barcode||'','maxlength="80"')+`<div class="field full"><label for="f-description">Product description</label><input id="f-description" name="description" value="${e(p?.description||draft?.description||'')}" required maxlength="200"></div>`+selectField('Category','category_id',categoryOptions,p?.category_id)+field('Unit','unit','text',p?.unit||(draft?'':'pc'),'required maxlength="20"')+field('Selling price','price','text',p?(p.amount_minor/100).toFixed(2):'','required inputmode="decimal"')+(!p?field('Opening quantity','quantity','number','0','required min="0" max="1000000" step="1"'):'')+selectField('Availability','active',[['true','Active'],['false','Inactive']],String(p?!!p.active:true))+`<div class="field full"><label for="f-image">Product photo (optional)</label><input id="f-image" name="image" type="file" accept="image/jpeg,image/png,image/webp"><small>JPEG, PNG, or WebP. Up to 5 MB and 12 megapixels.</small></div>`+(p?`<div class="field full" id="price-change-reason" hidden><label for="f-reason">Reason for price change</label><input id="f-reason" name="reason" maxlength="300" placeholder="For example, supplier cost changed" disabled><small>Required only when changing an existing selling price.</small></div>`:''),async(data,form)=>{
+    const body={...data,draft_id:draftId,category_id:Number(data.category_id),active:data.active==='true',amount_minor:minor(data.price)};
+    if(!p){form.dataset.requestKey ||= key();body.quantity=Number(data.quantity);body.request_key=form.dataset.requestKey;}
+    const result=await api(p?'/products/'+pid:'/products',p?'PUT':'POST',body);
     const image=$('[name=image]',form).files[0];
     if(image){const upload=new FormData();upload.append('image',image);try{await api('/products/'+result.product_id+'/image','POST',upload,true);}catch(error){toast('Product saved. Photo upload failed: '+error.message,true);closeModal();await loadCatalog();await navigate('catalog');return;}}
-    closeModal();await loadCatalog();await navigate('catalog');toast(draft?'Uploaded product updated. Add stock from Inventory.':'Product saved. Add stock from Inventory.');
+    closeModal();await loadCatalog();await navigate('catalog');toast(draft?'Uploaded product set up.':'Product saved.');
   },'Save product',true);
   if(p){
     const form=$('#modal-form'),priceInput=$('[name=price]',form),reasonGroup=$('#price-change-reason',form),reasonInput=$('[name=reason]',form);
@@ -393,7 +408,7 @@ document.addEventListener('click',async ev=>{
     const actions={
       'checkout-standard':()=>openCheckoutMode(false),'checkout-fullscreen':()=>openCheckoutMode(true),'toggle-checkout-fullscreen':()=>checkoutFullscreen?exitCheckoutFullscreen():enterCheckoutFullscreen(),
       'close-modal':closeModal,'boot':boot,'open-day':openDay,'open-shift':openShift,'close-shift':closeShift,'pay':paymentModal,
-      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,'cash-movement':cashMovement,
+      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'save-product-import':()=>savePendingProductImport(target),'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,'cash-movement':cashMovement,
       'new-user':()=>userForm(),'edit-user':()=>userForm(id),'manage-terminal':()=>terminalForm(target),'manager-close-shift':()=>managerCloseShift(id),
       'view-product-image':()=>viewProductImage(id),'view-cart-description':()=>viewCartDescription(id),'view-receipt':()=>showReceipt(id),'return-sale':()=>returnSale(id),
       'refresh-page':()=>navigate(S.page),'refresh-catalog':async()=>{await cartQueue;await refreshState();await renderCheckout();},
