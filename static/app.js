@@ -35,7 +35,9 @@ async function api(path, method='GET', data, isForm=false){
   try { response=await fetch('/api'+path,{method,credentials:'same-origin',headers:{...(method!=='GET'?{'X-CSRF-Token':S.csrf}:{}),...(!isForm&&data?{'Content-Type':'application/json'}:{})},body:data?(isForm?data:JSON.stringify(data)):undefined}); }
   catch{S.online=false;updateConnection();throw new Error('Connection lost. Reconnect and check the current ticket before retrying payment.');}
   S.online=true;updateConnection();
-  let result;try{result=await response.json();}catch{result={error:'The server could not finish the request. Check the current ticket before retrying payment.'};}
+  let result;try{result=await response.json();}catch{result={error:response.status===404
+    ? 'This feature is not available in the running server. Restart SQI POS and try again.'
+    : 'The server returned an unexpected response. Refresh the page and try again.'};}
   if(!response.ok){if(response.status===401&&S.user){S.user=null;renderAuth(false);}const error=new Error(result.error||'The request could not be completed.');error.status=response.status;throw error;}
   return result;
 }
