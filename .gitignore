@@ -21,3 +21,4 @@ exports/
 .pytest_cache/
 .test-runs/
 .print-helper/
+dist/

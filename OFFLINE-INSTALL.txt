@@ -1,0 +1,31 @@
+SQI POS — OFFLINE WINDOWS INSTALLATION
+======================================
+
+This package includes:
+- SQI POS application files
+- Official Python 3.13.16 Windows 64-bit installer
+- All required Python packages for offline installation
+
+Install on the POS host laptop
+--------------------------------
+1. Extract the entire ZIP to a local folder such as C:\SQI-POS.
+2. Do not run the application from inside the ZIP.
+3. Double-click Install-POS.cmd.
+4. If Python is missing, the bundled installer runs for the current Windows user.
+5. When installation finishes, double-click Start-POS.cmd.
+6. Open http://localhost:8765 and complete the first-time POS setup.
+
+Receipt printer
+---------------
+Install the printer manufacturer's Windows driver separately. Printer drivers
+are hardware-specific and are not included. Follow docs\printer-setup.md after
+the driver can print a Windows test page.
+
+Existing installation update
+----------------------------
+Keep your existing data, backups, certs, and .print-helper folders. Do not copy
+an empty folder over them. Back up and stop the POS before replacing application
+files, then run Install-POS.cmd again.
+
+The package does not contain a live sales database, backups, passwords, TLS
+private keys, or printer pairing tokens.

@@ -1,6 +1,6 @@
 # SQI POS
 
-An offline browser POS for bazaars, with products, inventory, cash sales, acknowledgement receipts, and daily reporting. Two Windows PCs share one SQLite database through a local router. Internet is needed for initial dependency installation; checkout works over the local network.
+An offline browser POS for bazaars, with products, inventory, cash sales, acknowledgement receipts, and daily reporting. Two Windows PCs share one SQLite database through a local router. The offline Windows package includes Python and all application dependencies; checkout works over the local network.
 
 **Version:** 0.1 · **Server:** Python, Flask, Cheroot · **Database:** SQLite · **Interface:** HTML, CSS, JavaScript
 
@@ -45,7 +45,7 @@ cd sqi-pos
 .\Start-POS.cmd
 ```
 
-If you downloaded a ZIP, skip the `git clone` and `cd sqi-pos` commands above and double-click `Install-POS.cmd` in the extracted folder. Installation creates a `.venv` environment and downloads the dependencies. After installation, use `Start-POS.cmd` whenever starting the host.
+If you downloaded the offline Windows ZIP, skip the `git clone` and `cd sqi-pos` commands above, extract the complete ZIP, and double-click `Install-POS.cmd`. When Python is missing, the bundled official installer runs for the current Windows user. Installation creates `.venv` and uses the bundled dependency wheels without internet. After installation, use `Start-POS.cmd` whenever starting the host.
 
 **Keeping existing records:** back up and stop the old server before moving its complete `data` folder to a new main laptop. Preserve `data`, `backups`, certificates, and print-helper configuration when updating application files. GitHub contains application code, not your live records.
 
