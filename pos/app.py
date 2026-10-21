@@ -10,6 +10,7 @@ import socket
 import sqlite3
 import threading
 import time
+from zipfile import BadZipFile
 from datetime import date, datetime, timedelta, timezone
 from contextlib import contextmanager
 from functools import wraps
@@ -17,6 +18,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, g, has_request_context, jsonify, make_response, render_template, request, send_file
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -46,6 +49,65 @@ def integer(data, name, minimum=0, maximum=100_000_000_00):
     value = data.get(name)
     require(type(value) is int and minimum <= value <= maximum, f'Invalid {name.replace("_", " ")}.')
     return value
+
+
+def excel_text(value):
+    if value is None:
+        return ''
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip()
+
+
+def product_rows_from_workbook(raw):
+    try:
+        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    except (InvalidFileException, BadZipFile, KeyError, OSError, ValueError):
+        raise Problem('Choose a valid Excel .xlsx workbook.')
+    try:
+        selected = None
+        for worksheet in workbook.worksheets:
+            max_row = min(worksheet.max_row or 0, 50)
+            max_column = min(worksheet.max_column or 0, 100)
+            for row_number, row in enumerate(worksheet.iter_rows(min_row=1, max_row=max_row,
+                                                                  max_col=max_column, values_only=True), 1):
+                headers = {}
+                for column, value in enumerate(row):
+                    header = re.sub(r'[^A-Z0-9]+', ' ', excel_text(value).upper()).strip()
+                    if header and header not in headers:
+                        headers[header] = column
+                if 'ITEM CODE' in headers and 'DESCRIPTION' in headers:
+                    selected = worksheet, row_number, headers['ITEM CODE'], headers['DESCRIPTION']
+                    break
+            if selected:
+                break
+        require(selected, 'The workbook needs ITEM CODE and DESCRIPTION column headers.')
+        worksheet, header_row, sku_column, description_column = selected
+        products, seen, rejected, duplicate_rows, populated_rows = [], set(), [], 0, 0
+        max_column = max(sku_column, description_column) + 1
+        for row_number, row in enumerate(worksheet.iter_rows(min_row=header_row + 1,
+                                                              max_col=max_column, values_only=True), header_row + 1):
+            sku, description = excel_text(row[sku_column]), excel_text(row[description_column])
+            if not sku and not description:
+                continue
+            populated_rows += 1
+            require(populated_rows <= 5000, 'The workbook can contain up to 5,000 populated product rows.')
+            if not sku or not description:
+                rejected.append({'row': row_number, 'reason': 'Both ITEM CODE and DESCRIPTION are required.'})
+                continue
+            if len(sku) > 60 or len(description) > 200 or any(ord(character) < 32 for character in sku + description):
+                rejected.append({'row': row_number, 'reason': 'ITEM CODE or DESCRIPTION is too long or contains unsupported characters.'})
+                continue
+            normalized = sku.casefold()
+            if normalized in seen:
+                duplicate_rows += 1
+                continue
+            seen.add(normalized)
+            products.append((sku, description, row_number))
+        require(populated_rows, 'No product rows were found below the headers.')
+        return worksheet.title, products, rejected, duplicate_rows
+    finally:
+        workbook.close()
 
 
 def request_key(data):
@@ -229,7 +291,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
 
     @app.errorhandler(413)
     def oversized(error):
-        return jsonify(error='The image is too large. Maximum upload size is 5 MB.'), 413
+        return jsonify(error='The upload is too large. Images can be up to 5 MB and product workbooks up to 6 MB.'), 413
 
     @app.get('/')
     def index():
@@ -344,7 +406,9 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             i.product_image_id FROM products p JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
             LEFT JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
             LEFT JOIN product_images i ON i.product_id=p.product_id AND i.superseded_at IS NULL ORDER BY p.description''').fetchall()
-        return jsonify(products=[dict(r) for r in products], categories=[dict(r) for r in db().execute('SELECT * FROM categories ORDER BY name')])
+        drafts = db().execute('SELECT * FROM product_import_drafts ORDER BY description').fetchall() if g.user['role'] == 'manager' else []
+        return jsonify(products=[dict(r) for r in products], drafts=[dict(r) for r in drafts],
+                       categories=[dict(r) for r in db().execute('SELECT * FROM categories ORDER BY name')])
 
     @app.post('/api/categories')
     @signed_in(True)
@@ -356,17 +420,54 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             event('category.created', 'categories', cid, after={'name': name})
         return jsonify(category_id=cid)
 
+    @app.post('/api/products/import')
+    @signed_in(True)
+    def product_import():
+        upload = request.files.get('workbook')
+        require(upload and upload.filename, 'Choose an Excel .xlsx workbook.')
+        filename = re.split(r'[\\/]', upload.filename)[-1].strip()
+        require(filename.lower().endswith('.xlsx') and len(filename) <= 255, 'Choose an Excel .xlsx workbook.')
+        raw = upload.read(6 * 1024 * 1024 + 1)
+        require(raw and len(raw) <= 6 * 1024 * 1024, 'The workbook must be 6 MB or smaller.')
+        sheet, rows, rejected, duplicate_rows = product_rows_from_workbook(raw)
+        imported = 0
+        existing = 0
+        with transaction(db()):
+            existing_skus = {row['sku'].casefold() for row in db().execute(
+                'SELECT sku FROM products UNION ALL SELECT sku FROM product_import_drafts')}
+            for sku, description, row_number in rows:
+                if sku.casefold() in existing_skus:
+                    existing += 1
+                    continue
+                db().execute('''INSERT INTO product_import_drafts
+                    (sku,description,source_filename,imported_by_user_id,imported_at) VALUES(?,?,?,?,?)''',
+                    (sku, description, filename, g.user['user_id'], now()))
+                existing_skus.add(sku.casefold())
+                imported += 1
+            event('products.bulk_imported', 'product_import_drafts', after={
+                'filename': filename, 'sheet': sheet, 'imported': imported, 'existing': existing,
+                'duplicate_rows': duplicate_rows, 'rejected_rows': len(rejected)})
+        return jsonify(imported=imported, existing=existing, duplicate_rows=duplicate_rows,
+                       rejected_rows=len(rejected), rejected=rejected[:20], sheet=sheet)
+
     @app.post('/api/products')
     @app.put('/api/products/<int:product_id>')
     @signed_in(True)
     def product_save(product_id=None):
         data = payload()
+        draft_id = data.get('draft_id')
+        if draft_id is not None:
+            require(type(draft_id) is int and draft_id > 0 and product_id is None, 'Invalid imported product.')
         fields = [text_field(data, 'sku', 60), text_field(data, 'barcode', 80, True) or None,
                   text_field(data, 'description', 200), integer(data, 'category_id', 1), text_field(data, 'unit', 20)]
         require(type(data.get('active', True)) is bool, 'Invalid product status.')
         amount = integer(data, 'amount_minor', 1)
         with transaction(db()):
             require(db().execute('SELECT 1 FROM categories WHERE category_id=? AND active=1', (fields[3],)).fetchone(), 'Choose an active category.')
+            draft = None
+            if draft_id is not None:
+                draft = db().execute('SELECT * FROM product_import_drafts WHERE product_import_draft_id=?', (draft_id,)).fetchone()
+                require(draft, 'This imported product was already completed or is no longer available.', 409)
             before = None
             if product_id:
                 old = db().execute('SELECT * FROM products WHERE product_id=?', (product_id,)).fetchone()
@@ -387,8 +488,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             if not current or current[0] != amount:
                 db().execute('INSERT INTO product_prices(product_id,amount_minor,effective_at,changed_by_user_id,reason) VALUES(?,?,?,?,?)',
                              (product_id, amount, now(), g.user['user_id'], reason))
+            if draft is not None:
+                db().execute('DELETE FROM product_import_drafts WHERE product_import_draft_id=?', (draft_id,))
             event('product.updated' if before else 'product.created', 'products', product_id, before=before,
-                  after={**dict(zip(('sku','barcode','description','category_id','unit'), fields)), 'active': data.get('active', True), 'amount_minor': amount},
+                  after={**dict(zip(('sku','barcode','description','category_id','unit'), fields)),
+                         'active': data.get('active', True), 'amount_minor': amount,
+                         'import_draft_id': draft_id},
                   reason=reason, approved=g.user['user_id'])
         return jsonify(product_id=product_id)
 

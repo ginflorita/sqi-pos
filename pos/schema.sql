@@ -57,6 +57,11 @@ CREATE TABLE IF NOT EXISTS products (
  description TEXT NOT NULL, category_id INTEGER NOT NULL REFERENCES categories(category_id), unit TEXT NOT NULL,
  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1))
 );
+CREATE TABLE IF NOT EXISTS product_import_drafts (
+ product_import_draft_id INTEGER PRIMARY KEY, sku TEXT NOT NULL UNIQUE COLLATE NOCASE,
+ description TEXT NOT NULL, source_filename TEXT NOT NULL,
+ imported_by_user_id INTEGER NOT NULL REFERENCES users(user_id), imported_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS product_images (
  product_image_id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(product_id),
  image_data BLOB NOT NULL, thumbnail_data BLOB NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL,
@@ -206,4 +211,4 @@ CREATE TABLE IF NOT EXISTS receipt_print_jobs (
  created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT, error_message TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_automatic_print_per_sale ON receipt_print_jobs(sale_id) WHERE job_kind='automatic';
-PRAGMA user_version=2;
+PRAGMA user_version=3;

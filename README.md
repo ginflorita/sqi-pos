@@ -8,7 +8,7 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 
 | Area | Available in version 0.1 |
 | --- | --- |
-| Products | Unique SKU, optional barcode, description, category, unit, product images, and price history |
+| Products | Unique SKU, optional barcode, description, category, unit, product images, price history, and Excel bulk upload for SKU and description drafts |
 | Inventory | Opening stock, stock in/out, physical counts, adjustments, and movement history |
 | Checkout | Optional fullscreen with no sidebar, product search/barcode entry with quantity confirmation before adding, saved tickets, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
@@ -64,6 +64,8 @@ You create the production manager credentials during setup. Setup must be comple
 
 Signed-in managers can add or edit products and photos without entering their password again. A reason is required only when changing an existing selling price. Product changes still record the manager, time, and changed details in the audit trail. Financial, stock, and account approvals retain password confirmation.
 
+For a large product list, open **Products → Bulk upload** and choose an `.xlsx` workbook containing `ITEM CODE` and `DESCRIPTION` headers. Only those two columns are imported. Repeated and existing SKUs are skipped. Imported rows stay under **Products needing setup** with image, category, price, and quantity blank; use **Complete** to supply the required selling details before the item can appear at checkout.
+
 Adding stock through **Stock in** or **Opening stock** needs no manual reason: a blank field records `Stock received` or `Opening stock` automatically. Stock-out, physical counts, and signed adjustments still require a reason.
 
 ![First-time POS setup](docs/screenshots/first-setup.png)
@@ -116,7 +118,7 @@ After installing dependencies, run:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The recorded verification has **27 passing tests**, including concurrent checkout, last-unit stock competition, payment retries, catalog permissions, product/stock reason rules, returns, and restore. The browser recovery check also confirmed one sale, one payment, and one stock deduction after a simulated failed response. See the **[verification record](docs/verification.md)**.
+The recorded verification has **32 passing tests**, including concurrent checkout, last-unit stock competition, payment retries, catalog permissions, Excel product imports, product/stock reason rules, returns, and restore. The browser recovery check also confirmed one sale, one payment, and one stock deduction after a simulated failed response. See the **[verification record](docs/verification.md)**.
 
 ## Optional demo
 
@@ -131,7 +133,7 @@ Open **http://localhost:8766**. Demo credentials are `demo` / `Bazaar-demo-2026!
 
 ## Current scope
 
-Version 0.1 supports cash payments, whole quantities, one active bazaar, one open ticket per cashier, and separate cash drawers. Discounts and added tax are zero. Fractional quantities, non-cash payments, catalog imports, tax/discount configuration, and additional bazaar creation remain planned.
+Version 0.1 supports cash payments, whole quantities, one active bazaar, one open ticket per cashier, separate cash drawers, and SKU/description imports from Excel. Discounts and added tax are zero. Fractional quantities, non-cash payments, tax/discount configuration, and additional bazaar creation remain planned.
 
 Before real trading, confirm the bazaar's currency, tax treatment, receipt content, and printer layout, and test both physical PCs, the router, external backups, restore, and power interruption. The host is a single point of availability. Application audit rules do not prevent a host administrator from changing local files.
 

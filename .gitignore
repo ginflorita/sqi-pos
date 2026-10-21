@@ -22,3 +22,4 @@ exports/
 .test-runs/
 .print-helper/
 dist/
+python-*-amd64.exe

@@ -10,6 +10,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from openpyxl import Workbook
 from PIL import Image
 
 from pos.app import create_app
@@ -56,6 +57,15 @@ class POSTest(unittest.TestCase):
         db=connect(self.database)
         try:return db.execute(sql).fetchone()[0]
         finally:db.close()
+
+    def upload_products(self,rows,headers=('ITEM CODE','DESCRIPTION','CATEGORY','PRICE','TOTAL (PCS)')):
+        workbook=Workbook();sheet=workbook.active;sheet.title='Inventory'
+        sheet.append(['SQI Product List and Inventory']);sheet.append(['Only the selected columns are imported.'])
+        sheet.append(list(headers))
+        for row in rows:sheet.append(list(row))
+        content=io.BytesIO();workbook.save(content);workbook.close();content.seek(0)
+        return self.client.post('/api/products/import',data={'workbook':(content,'products.xlsx')},
+            headers={'X-CSRF-Token':self.csrf},content_type='multipart/form-data')
 
     def second_cashier(self):
         uid=self.call('/users',{'username':'cashier2','display_name':'Second cashier','role':'cashier','active':True,'password':PASSWORD,'manager_password':PASSWORD}).json['user_id']
@@ -144,6 +154,36 @@ class POSTest(unittest.TestCase):
             self.assertEqual(json.loads(events[-1]['after_json'])['description'],'Updated description')
             self.assertIsNone(events[-1]['reason'])
         finally:connection.close()
+
+    def test_bulk_product_upload_imports_only_sku_and_description_as_drafts(self):
+        response=self.upload_products([
+            ('TEST-01','Existing product','Existing category',999,500),
+            ('NEW-01','First imported product','Ignored category',125,900),
+            (188,'Numeric item code','Ignored category',85,42),
+            ('NEW-01','Repeated item code','Different category',300,12),
+            ('MISSING-DESCRIPTION','','Ignored category',50,1),
+        ])
+        self.assertEqual(response.status_code,200,response.get_data(as_text=True))
+        result=response.json
+        self.assertEqual((result['imported'],result['existing'],result['duplicate_rows'],result['rejected_rows']),(2,1,1,1))
+        catalog=self.client.get('/api/catalog').json
+        self.assertEqual({draft['sku'] for draft in catalog['drafts']},{'NEW-01','188'})
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM products'),1)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_prices'),1)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM stock_balances'),1)
+        draft=next(draft for draft in catalog['drafts'] if draft['sku']=='NEW-01')
+        completed={'draft_id':draft['product_import_draft_id'],'sku':draft['sku'],'description':draft['description'],
+                   'category_id':self.category,'unit':'pc','amount_minor':12500,'active':True}
+        self.call('/products',completed)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_import_drafts'),1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM products WHERE sku='NEW-01'"),1)
+        self.assertEqual(self.scalar("SELECT quantity_on_hand FROM stock_balances JOIN products USING(product_id) WHERE sku='NEW-01'"),0)
+
+    def test_bulk_product_upload_requires_expected_headers(self):
+        response=self.upload_products([('A-1','Description')],headers=('SKU','PRODUCT NAME'))
+        self.assertEqual(response.status_code,400)
+        self.assertIn('ITEM CODE and DESCRIPTION',response.json['error'])
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_import_drafts'),0)
 
     def test_only_existing_price_changes_require_a_reason(self):
         data={'sku':'TEST-01','barcode':'12345678','description':'Should roll back','category_id':self.category,'unit':'pc','amount_minor':15000,'active':True}

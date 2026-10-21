@@ -8,6 +8,8 @@ Open http://localhost:8765 on the host to create your manager account and bazaar
 
 Product creation, normal product edits, and photo uploads use the signed-in manager session without another password prompt. A new product's initial price gets an automatic audit reason. Changing an existing selling price requires a reason; leaving its price unchanged does not. The audit records the manager, time, and before/after details automatically. Stock, financial, and account approvals still require password confirmation.
 
+For bulk setup, choose **Products → Bulk upload** and upload an `.xlsx` workbook up to 6 MB. The importer finds `ITEM CODE` and `DESCRIPTION` headers within the first 50 rows and ignores all other columns. Repeated rows and SKUs already in the catalog or pending list are skipped. Valid rows appear under **Products needing setup** with image, category, price, and quantity blank. Select **Complete** to add category, unit, selling price, availability, and an optional photo. Only completed products enter checkout and inventory.
+
 For **Stock in** and **Opening stock**, the reason is optional. Leave it blank to record `Stock received` or `Opening stock` automatically, or enter a delivery note. **Stock out**, **Physical count**, and **Signed adjustment** require an explanation. Every stock posting still records its quantities, manager, time, and approval; duplicate-request and negative-stock checks remain enforced.
 
 The server runs Cheroot with eight worker threads and debug mode disabled. Startup checks SQLite integrity, foreign keys, and stock-ledger reconciliation. It stops if these fail. Local HTTP binds only to loopback; LAN mode requires HTTPS.

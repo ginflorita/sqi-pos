@@ -108,7 +108,7 @@ HTTPS startup was verified on loopback with a generated local certificate and ce
 
 Complete a sale from each physical laptop; disconnect/reconnect Laptop 2 during confirmation; check printer failure/reprint; reconcile both cash drawers; verify the external backup drive and a restore; rehearse a power interruption; confirm actual currency, tax treatment, receipt content, and dates.
 
-Fractional quantities, non-cash payments, tax/discount configuration, catalog imports, additional bazaar creation, Windows startup-service installation, and automatic backup deletion are outside version 0.1.
+Fractional quantities, non-cash payments, tax/discount configuration, additional bazaar creation, Windows startup-service installation, and automatic backup deletion are outside version 0.1.
 
 ## Separate laptop receipt printers — 2026-10-20
 

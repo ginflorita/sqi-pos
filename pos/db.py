@@ -28,7 +28,7 @@ def initialize(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
         schema_version = db.execute('PRAGMA user_version').fetchone()[0]
-        if schema_version not in (0, 1, 2):
+        if schema_version not in (0, 1, 2, 3):
             raise RuntimeError('Unsupported database version. Restore the matching application.')
         db.execute('PRAGMA journal_mode=WAL')
         if schema_version == 1:
