@@ -41,57 +41,118 @@ def receipt_image(db, sale_id, paper_size):
     # Letter paper keeps the exact 80 mm receipt artwork. The Windows adapter
     # centers it at its physical 80 mm width instead of stretching it.
     width = 384 if is_58 else 576
-    font = None
-    font_path = None
-    for path in ('C:/Windows/Fonts/arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'):
-        if Path(path).exists():
-            font_path = path
-            font = ImageFont.truetype(path, 20 if is_58 else 23)
-            break
-    font = font or ImageFont.load_default(size=20)
-    rows = []
-    def add(text):
-        # Pixel-based wrapping preserves arbitrary descriptions without clipping.
-        line = ''
-        for char in str(text):
-            if font.getlength(line + char) > width - 28:
-                rows.append(line)
-                line = ''
-            line += char
-        rows.append(line)
+    def load_font(size, bold=False, mono=True):
+        candidates = (
+            ('C:/Windows/Fonts/consolab.ttf' if bold else 'C:/Windows/Fonts/consola.ttf'),
+            ('/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'),
+            ('C:/Windows/Fonts/arialbd.ttf' if bold else 'C:/Windows/Fonts/arial.ttf'),
+        ) if mono else (
+            ('C:/Windows/Fonts/arialbd.ttf' if bold else 'C:/Windows/Fonts/arial.ttf'),
+            ('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'),
+        )
+        for path in candidates:
+            if Path(path).exists():
+                return ImageFont.truetype(path, size)
+        return ImageFont.load_default(size=size)
+
+    regular = load_font(16 if is_58 else 18)
+    small = load_font(11 if is_58 else 13)
+    heading = load_font(15 if is_58 else 18, bold=True)
+    total_font = load_font(21 if is_58 else 26, bold=True)
+    company_font = load_font(12 if is_58 else 15, mono=False)
+
     def amount(n):
-        return f'PHP {n / 100:,.2f}'
-    add("SQI Group Int'l Corp - Philippines")
-    add('ACKNOWLEDGEMENT RECEIPT')
-    add(sale['receipt_number'].replace('BZ-', 'SQI-', 1))
-    add('Date: ' + sale['business_date'])
-    add('Cashier: ' + sale['display_name'])
-    add('-' * (27 if is_58 else 39))
-    for line in lines:
-        add(line['sku_snapshot'] + ' ' + line['description_snapshot'])
-        add(f"{line['quantity']} x {amount(line['unit_price_minor'])} = {amount(line['line_total_minor'])}")
-    add('-' * (27 if is_58 else 39))
-    add('TOTAL: ' + amount(sale['total_minor']))
-    add('Cash paid: ' + amount(payment['tendered_minor']))
-    add('Change: ' + amount(payment['change_minor']))
-    add('Thank you for your purchase.')
-    add('Head office: 18 Pineapple Rd, Malabon, 1475 Metro Manila, Philippines')
-    logo = Image.open(Path(__file__).resolve().parent.parent / 'static/sqi-logo.png').convert('RGBA')
-    logo.thumbnail((180, 100))
-    step = 30
-    top = 120
+        return f'₱{n / 100:,.2f}'
+
     inset = 14
-    image = Image.new('RGB', (width, top + 5 + step * len(rows) + 100), 'white')
-    image.paste(logo, ((width - logo.width) // 2, 8), logo)
+    right_edge = width - inset
+    image = Image.new('RGB', (width, 2400), 'white')
     draw = ImageDraw.Draw(image)
-    for i, row in enumerate(rows):
-        draw.text((inset, top + i * step), row, font=font, fill='black')
-    footer_font = ImageFont.truetype(font_path, 12 if is_58 else 17) if font_path else font
-    footer_y = top + 5 + step * len(rows)
-    for offset, pair in enumerate((('Tel: 8-364-7561','Website: https://sqigroup.ph'),
-                                   ('Office Hours: 9:00 AM – 6:00 PM','Monday – Saturday'))):
-        for column, text in enumerate(pair):
-            draw.text((inset + column * (width // 2), footer_y + offset * 28), text, font=footer_font, fill='black')
+
+    def centered(text, y, font, fill='black'):
+        draw.text(((width - font.getlength(text)) / 2, y), text, font=font, fill=fill)
+
+    def right(text, y, font=regular):
+        draw.text((right_edge - font.getlength(text), y), text, font=font, fill='black')
+
+    def rule(y):
+        dash, gap = (7, 5) if is_58 else (9, 6)
+        x = inset
+        while x < right_edge:
+            draw.line((x, y, min(x + dash, right_edge), y), fill='#777', width=1)
+            x += dash + gap
+
+    def wrapped(text, font, maximum):
+        words = str(text).split()
+        result, current = [], ''
+        for word in words:
+            candidate = f'{current} {word}'.strip()
+            if current and font.getlength(candidate) > maximum:
+                result.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            result.append(current)
+        return result or ['']
+
+    logo = Image.open(ROOT / 'static' / 'sqi-logo.png').convert('RGBA')
+    logo.thumbnail((150, 85) if is_58 else (190, 105))
+    image.paste(logo, ((width - logo.width) // 2, 8), logo)
+    y = 96 if is_58 else 116
+    centered("SQI Group Int'l Corp - Philippines", y, company_font)
+    y += 28
+    centered('ACKNOWLEDGEMENT RECEIPT', y, heading)
+    y += 29
+    centered(sale['receipt_number'].replace('BZ-', 'SQI-', 1), y, small)
+    y += 42
+    rule(y)
+    y += 24
+    draw.text((inset, y), 'Date: ' + sale['business_date'], font=small, fill='black')
+    y += 26
+    draw.text((inset, y), 'Cashier: ' + sale['display_name'], font=small, fill='black')
+    y += 34
+    rule(y)
+    y += 27
+    draw.text((inset, y), 'ITEM', font=small, fill='black')
+    right('AMOUNT', y, small)
+    y += 40
+    for line in lines:
+        for description in wrapped(line['description_snapshot'], regular, width - inset * 2):
+            draw.text((inset, y), description, font=regular, fill='black')
+            y += 25 if is_58 else 28
+        detail = f"{line['quantity']} x {amount(line['unit_price_minor'])}"
+        draw.text((inset, y), detail, font=small, fill='black')
+        right(amount(line['line_total_minor']), y, small)
+        y += 40 if is_58 else 46
+    rule(y)
+    y += 22
+    draw.text((inset, y + 4), 'TOTAL', font=regular, fill='black')
+    right(amount(sale['total_minor']), y, total_font)
+    y += 54
+    draw.text((inset, y), 'Cash paid', font=regular, fill='black')
+    right(amount(payment['tendered_minor']), y)
+    y += 34
+    draw.text((inset, y), 'Change', font=regular, fill='black')
+    right(amount(payment['change_minor']), y)
+    y += 42
+    rule(y)
+    y += 24
+    centered('Thank you for your purchase.', y, small)
+    y += 35
+    address = 'Head office: 18 Pineapple Rd, Malabon, 1475 Metro Manila, Philippines'
+    for address_line in wrapped(address, small, width - inset * 2):
+        draw.text((inset, y), address_line, font=small, fill='black')
+        y += 21
+    y += 8
+    footer_gap = width // 2
+    footer = (('Tel: 8-364-7561', 'Website: https://sqigroup.ph'),
+              ('Office Hours: 9:00 AM – 6:00 PM', 'Monday – Saturday'))
+    for left, right_text in footer:
+        draw.text((inset, y), left, font=small, fill='black')
+        draw.text((footer_gap, y), right_text, font=small, fill='black')
+        y += 22
+    image = image.crop((0, 0, width, y + 22))
     output = io.BytesIO()
     image.save(output, 'PNG')
     return output.getvalue()
