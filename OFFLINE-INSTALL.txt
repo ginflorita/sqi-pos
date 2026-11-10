@@ -14,6 +14,16 @@ Install on the POS host laptop
 4. If Python is missing, the bundled installer runs for the current Windows user.
 5. When installation finishes, double-click Start-POS.cmd.
 6. Open http://localhost:8765 and complete the first-time POS setup.
+7. For two laptops, complete docs\two-pc-setup.md (HTTPS, firewall, and laptop
+   approval). Then double-click Setup-Host-Shortcut.cmd once on the host.
+8. Double-click Create-Cashier-Shortcut.cmd on the host and enter its reserved
+   network address. Copy the generated SQI-POS-Second-Laptop.url to the second
+   laptop Desktop. The second laptop only opens that browser icon; it does not
+   run another server or database.
+
+After setup, the host server starts at Windows sign-in. The host desktop icon
+starts it if needed and opens the browser. The second laptop desktop icon opens
+the host over HTTPS. The host must stay signed in, awake, and connected.
 
 Receipt printer
 ---------------

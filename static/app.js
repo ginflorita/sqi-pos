@@ -52,7 +52,7 @@ function table(headers,rows){return `<div class="table-scroll"><table><thead><tr
 function pill(text,style='success'){return `<span class="pill ${style}"><span class="dot"></span>${e(text)}</span>`;}
 function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>${e(title)}</h1><p>${e(description)}</p></div><div class="actions">${actions}</div></div>`;}
 function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
-function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;}
+function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}const wasQuantity=$('#modal-title')?.textContent==='Choose quantity';$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;if(wasQuantity&&S.page==='checkout')$('#barcode-input')?.focus({preventScroll:true});}
 function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<form id="modal-form" class="form-grid">${body}<div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green">${submit}${icon('arrow')}</button></div></form>`,wide);$('#modal-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const submitButton=$('[type=submit]',form);if(submitButton.disabled)return;submitButton.disabled=true;$('.form-error',form).textContent='';try{await onSubmit(Object.fromEntries(new FormData(form)),form);}catch(error){$('.form-error',form).textContent=error.message;}finally{submitButton.disabled=false;}});}
 async function refreshState(){const data=await api('/state');Object.assign(S,data);return data;}
 async function loadCatalog(){const data=await api('/catalog');S.products=data.products;S.productDrafts=data.drafts||[];S.categories=data.categories;}
@@ -125,11 +125,27 @@ async function renderCheckout(){
   else{S.ticket=null;S.cart=[];}
   S.cartError=false;
   $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions">${printerConnectButton(S.receiptPrinter)}${button('Refresh stock','refresh-catalog','light','refresh')}${button(checkoutFullscreen?'Exit fullscreen':'Fullscreen','toggle-checkout-fullscreen','light',checkoutFullscreen?'collapse':'expand',`aria-pressed="${checkoutFullscreen}"`)}</div></div>`+gate()+`<div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Search products, SKU or scan barcode…" aria-label="Search products" value="${e(S.search)}" autocomplete="off"><kbd>/</kbd></div></div><div class="category-tabs" id="category-tabs"></div><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-grid" id="product-grid"></div><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
-  $('#product-search').addEventListener('input',ev=>{S.search=ev.target.value;renderProducts();});
+  const searchInput=$('#product-search');
+  searchInput.placeholder='Search by name, SKU, or barcode';
+  searchInput.setAttribute('aria-label','Search by product name, SKU, or barcode');
+  $('.search-row').insertAdjacentHTML('beforeend',`<form id="barcode-form" class="barcode-form"><input id="barcode-input" type="text" placeholder="Scan or type barcode" aria-label="Scan or type barcode or SKU" autocomplete="off" autocapitalize="off" spellcheck="false"><button type="submit" class="btn green">Find item</button></form>`);
+  $('.search-row').insertAdjacentHTML('afterend','<p class="barcode-hint">Scanner: scan into the barcode box and press Enter. Confirm the quantity before adding the item.</p>');
+  $('#barcode-form').addEventListener('submit',ev=>{
+    ev.preventDefault();
+    const input=$('#barcode-input'),code=input.value.trim();
+    if(!code){input.focus();return;}
+    if(quantityDialogOpening||$('.modal')||S.paying){toast('Finish the current item before scanning another.',true);return;}
+    const product=S.products.find(p=>p.active&&(p.barcode===code||p.sku.toLowerCase()===code.toLowerCase()));
+    if(!product){toast('No active product matches that barcode or SKU. Check Products or search by name.',true);input.select();return;}
+    input.value='';
+    productQuantityModal(product.product_id).catch(error=>{toast(error.message,true);input.focus();});
+  });
+  searchInput.addEventListener('input',ev=>{S.search=ev.target.value;renderProducts();});
   $('#product-search').addEventListener('keydown',ev=>{if(ev.key==='Enter'){ev.preventDefault();const matches=S.products.filter(p=>p.active&&(p.sku.toLowerCase()===S.search.toLowerCase()||p.barcode===S.search));if(matches.length===1)productQuantityModal(matches[0].product_id).catch(err=>toast(err.message,true));}});
   renderCategories();renderProducts();renderCart();
   if(recoveredSale){await showReceipt(recoveredSale);toast('Recovered the saved payment. This is the original receipt.');}
   else if(pendingOpen)await paymentModal();
+  else $('#barcode-input')?.focus({preventScroll:true});
 }
 function printerConnectButton(printer,compact=false){
   if(printer?.online)return button(compact?'Connected':'Printer connected','start-print-helper','light','check','disabled aria-label="Receipt printer connected"');
@@ -326,6 +342,10 @@ async function productForm(pid,draftId){
     if(image){const upload=new FormData();upload.append('image',image);try{await api('/products/'+result.product_id+'/image','POST',upload,true);}catch(error){toast('Product saved. Photo upload failed: '+error.message,true);closeModal();await loadCatalog();await navigate('catalog');return;}}
     closeModal();await loadCatalog();await navigate('catalog');toast(draft?'Uploaded product set up.':'Product saved.');
   },'Save product',true);
+  const productBarcode=$('#f-barcode');
+  productBarcode.placeholder='Type or scan the label barcode';
+  productBarcode.autocomplete='off';
+  productBarcode.parentElement.insertAdjacentHTML('beforeend','<small>Click this field and scan the label, or type its barcode. Each product needs a unique code.</small>');
   if(p){
     const form=$('#modal-form'),priceInput=$('[name=price]',form),reasonGroup=$('#price-change-reason',form),reasonInput=$('[name=reason]',form);
     const updatePriceReason=()=>{let changed=false;try{changed=minor(priceInput.value)!==p.amount_minor;}catch{}reasonGroup.hidden=!changed;reasonInput.required=changed;reasonInput.disabled=!changed;};

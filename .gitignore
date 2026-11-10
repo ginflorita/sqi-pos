@@ -18,8 +18,11 @@ certs*/
 .env.*
 exports/
 *.log
+SQI-POS-Second-Laptop.url
 .pytest_cache/
 .test-runs/
 .print-helper/
 dist/
+output/
+outputs/
 python-*-amd64.exe

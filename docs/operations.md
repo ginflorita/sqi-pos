@@ -50,7 +50,7 @@ Current order uses compact text-only rows with **SKU | DESC | QTY | TOTAL**. Sel
 
 1. The manager opens Day 1, Day 2, etc. with the business date. The date must follow the prior day. It remains open across midnight until explicitly closed.
 2. Each cashier opens a shift with the actual starting cash in their own drawer.
-3. Search products/SKUs and click a product, or scan a barcode and press Enter. In **Choose quantity**, enter **Quantity to add**, review the amount, and confirm **Add to order**. Clicking a product alone does not add it; Cancel or Escape leaves the order unchanged. Existing quantities are shown separately, and additional quantities cannot exceed remaining available stock. Confirmed cart changes save to the host; available stock is rechecked at checkout.
+3. Search by product name, SKU, or barcode and click a product. For a scanner or manually typed code, use the dedicated **Scan or type barcode** field; Enter or **Find item** opens the exact matching product. A keyboard-style scanner can send Enter automatically. In **Choose quantity**, enter **Quantity to add**, review the amount, and confirm **Add to order**. Clicking or scanning a product alone does not add it; Cancel or Escape leaves the order unchanged. Existing quantities are shown separately, and additional quantities cannot exceed remaining available stock. Confirmed cart changes save to the host; available stock is rechecked at checkout.
 4. Review payment, enter cash paid, verify change, and select **Confirm payment**. A **Yes / No** dialog shows the total, amount paid, and change. **Yes** submits the payment; **No**, Escape, or closing the confirmation returns to the payment form with its amount retained. No payment request is created before Yes. The receipt comes from the committed sale. **Print / save PDF** opens printing directly, with no reason prompt. Each request automatically records `Customer copy`, the receipt, user, laptop, and time in the audit. Browser printing cannot prove that paper actually printed.
 5. Complete, transfer, or cancel open tickets before closing shifts. Count actual cash. Variances are retained for manager review.
 6. Close every shift and ticket before closing the day. Check the backup result after day close.
@@ -118,7 +118,7 @@ Replace the ID and username with the pending terminal and actual manager account
 
 ## Equipment readiness
 
-Keep the host powered and awake. Protect its data, code, keys, and backups from ordinary cashier Windows accounts. The host remains a single point of availability. Start `Start-POS.cmd` before selling; this version does not install a Windows startup service.
+Keep the host powered and awake. Protect its data, code, keys, and backups from ordinary cashier Windows accounts. The host remains a single point of availability. Run `Setup-Host-Shortcut.cmd` once to create a per-user Windows sign-in startup shortcut and a desktop icon that starts the server if needed. This is not a Windows service: the host user must be signed in. `Start-POS.cmd` remains available for manual troubleshooting.
 
 Before the bazaar, test the actual router, both laptops, printer, external backup destination, and a power interruption. Confirm receipt content, currency, tax treatment, and business dates. An administrator can edit local files; the audit is not tamper-proof against host administrator access. Physical cash handover cannot be atomic with a database commit.
 

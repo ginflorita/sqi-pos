@@ -72,7 +72,7 @@ cd "C:\SQI-POS"
 .\Start-POS.cmd --lan --cert certs/pos.crt --key certs/pos.key
 ```
 
-Keep the server running while either PC uses the POS.
+Keep the server running while either PC uses the POS. After verifying HTTPS, stop the manual server with **Ctrl+C**, then double-click **Setup-Host-Shortcut.cmd** once on the main laptop. It creates an **SQI POS** desktop icon and a Windows sign-in startup shortcut for the server. The icon starts LAN HTTPS automatically when `certs/pos.crt` and `certs/pos.key` are present, then opens the browser.
 
 ## 5. Allow the local connection through Windows Firewall
 
@@ -88,6 +88,8 @@ The application does not automatically change firewall or certificate trust sett
 | Second PC | `https://192.168.1.115:8765` |
 
 Use the main PC's actual network address on the second PC. `localhost` always refers to the PC using that browser. Keep a consistent browser address for device approval and pending-payment recovery.
+
+On the main laptop, double-click **Create-Cashier-Shortcut.cmd** and enter its reserved IP address (without `https://`). Copy the generated `SQI-POS-Second-Laptop.url` file from the project folder to the second laptop's desktop. The cashier then double-clicks that icon to open the usual browser. This is a browser shortcut; do not run another POS server on the second laptop.
 
 If setup is incomplete, create the manager account on the main PC. When switching from HTTP to HTTPS, sign out and back in to refresh the authentication cookies for HTTPS.
 
@@ -113,9 +115,9 @@ The second laptop can use a downloaded copy of the application source for the he
 ## 10. Daily startup and shutdown
 
 1. Connect both laptops to the same router.
-2. On the main laptop, start the POS with the LAN command from step 4; keep it awake and plugged in.
+2. Sign in to Windows on the main laptop. The startup shortcut starts the server automatically; its desktop **SQI POS** icon also starts it if needed. Keep the laptop awake and plugged in.
 3. If using automatic printing, run `Start-Print-Helper.cmd` on each laptop.
-4. Open the usual HTTPS address in each laptop's regular browser profile. Sign in, open the business day, and open each cashier's shift.
+4. Double-click the **SQI POS** desktop icon on each laptop. Sign in, open the business day, and open each cashier's shift.
 5. At closing, finish orders, reconcile and close shifts, close the business day, and verify the backup. Keep an additional recovery copy on a separate drive.
 
 ## Updating application files later

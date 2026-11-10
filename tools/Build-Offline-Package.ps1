@@ -18,7 +18,8 @@ New-Item -ItemType Directory -Path $packageRoot,$wheelhouse,$installers -Force |
 
 $runtimeItems = @(
     '.gitattributes', 'Install-POS.cmd', 'OFFLINE-INSTALL.txt', 'README.md',
-    'requirements.txt', 'run.py', 'Start-POS.cmd', 'Start-Print-Helper.cmd',
+    'requirements.txt', 'run.py', 'Start-POS.cmd', 'Open-POS.cmd',
+    'Setup-Host-Shortcut.cmd', 'Create-Cashier-Shortcut.cmd', 'Start-Print-Helper.cmd',
     'docs', 'pos', 'static', 'templates', 'tools'
 )
 foreach ($item in $runtimeItems) {

@@ -10,7 +10,7 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 | --- | --- |
 | Products | Unique SKU, optional barcode, description, category, unit, product images, price history, and Excel bulk upload with records saved for later updates |
 | Inventory | Opening stock, stock in/out, physical counts, adjustments, and movement history |
-| Checkout | Optional fullscreen with no sidebar, product search/barcode entry with quantity confirmation before adding, saved tickets, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
+| Checkout | Optional fullscreen with no sidebar, name/SKU/barcode search, a dedicated scanner or manual barcode field with quantity confirmation before adding, saved tickets, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
 | Accounts | Named managers/cashiers, laptop approval, password confirmation for sensitive changes, and expiring sessions |
 | Bazaar days | Day 1, Day 2, etc., cashier shifts, opening/closing cash counts, and cash variance |
@@ -45,11 +45,13 @@ cd sqi-pos
 .\Start-POS.cmd
 ```
 
-If you downloaded the offline Windows ZIP, skip the `git clone` and `cd sqi-pos` commands above, extract the complete ZIP, and double-click `Install-POS.cmd`. When Python is missing, the bundled official installer runs for the current Windows user. Installation creates `.venv` and uses the bundled dependency wheels without internet. After installation, use `Start-POS.cmd` whenever starting the host.
+If you downloaded the offline Windows ZIP, skip the `git clone` and `cd sqi-pos` commands above, extract the complete ZIP, and double-click `Install-POS.cmd`. When Python is missing, the bundled official installer runs for the current Windows user. Installation creates `.venv` and uses the bundled dependency wheels without internet. Complete first-time setup with `Start-POS.cmd`. After the two-PC HTTPS setup, run `Setup-Host-Shortcut.cmd` once on the main laptop. It creates an **SQI POS** desktop icon and starts the server automatically when that Windows user signs in. The icon also starts the server if needed, waits until it is ready, and opens the browser. `Start-POS.cmd` remains available for manual troubleshooting.
 
 **Keeping existing records:** back up and stop the old server before moving its complete `data` folder to a new main laptop. Preserve `data`, `backups`, certificates, and print-helper configuration when updating application files. GitHub contains application code, not your live records.
 
 Open **http://localhost:8765** on the main PC. Keep the server running while either cashier is working.
+
+For the second laptop, complete the [two-PC HTTPS setup](docs/two-pc-setup.md), then run `Create-Cashier-Shortcut.cmd` on the main laptop with its reserved network address. Copy the resulting `SQI-POS-Second-Laptop.url` to the second laptop's desktop. Its cashier only double-clicks that icon and signs in. The second laptop runs no POS server and has no separate database. The main laptop must be signed in to Windows, awake, and connected to the router.
 
 ### First-time setup
 
@@ -97,6 +99,10 @@ The main PC uses `https://localhost:8765`; the second PC uses `https://<MAIN-PC-
 6. Review reports, close the business day, and check that its backup succeeded.
 
 After an uncertain payment response, refresh the same browser to check the existing ticket. It retrieves the original receipt when the sale committed. Use one ticket for each physical customer purchase.
+
+### Barcode scanners and manual search
+
+Save each product's unique barcode under **Products**. In **Checkout**, use **Search by name, SKU, or barcode** to browse matching products, or click **Scan or type barcode** and scan a label or type its code, then press **Enter** or **Find item**. A scanner that acts as a keyboard and sends Enter after the code uses the same field. Matching opens **Choose quantity**; nothing is added until the cashier confirms. If the scanner has no Enter suffix, press **Find item** after scanning. Each cashier laptop uses its own scanner; the second laptop still connects to the single POS server on the main laptop.
 
 ## Backups and restore
 
