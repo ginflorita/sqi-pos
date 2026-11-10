@@ -87,20 +87,19 @@ The application does not automatically change firewall or certificate trust sett
 | Main PC | `https://localhost:8765` |
 | Second PC | `https://192.168.1.115:8765` |
 
-Use the main PC's actual network address on the second PC. `localhost` always refers to the PC using that browser. Keep a consistent browser address for device approval and pending-payment recovery.
+Use the main PC's actual network address on the second PC. `localhost` always refers to the PC using that browser. Keep a consistent browser address for pending-payment recovery.
 
 On the main laptop, double-click **Create-Cashier-Shortcut.cmd** and enter its reserved IP address (without `https://`). Copy the generated `SQI-POS-Second-Laptop.url` file from the project folder to the second laptop's desktop. The cashier then double-clicks that icon to open the usual browser. This is a browser shortcut; do not run another POS server on the second laptop.
 
 If setup is incomplete, create the manager account on the main PC. When switching from HTTP to HTTPS, sign out and back in to refresh the authentication cookies for HTTPS.
 
-## 7. Create and approve the second cashier
+## 7. Create the second cashier account
 
-1. On the main PC, sign in as the manager and open **Team & laptops → Add account**.
+1. On the main PC, sign in as the manager and open **Team → Add account**.
 2. Create the second person's named cashier account.
-3. Sign in with that account on the second PC and enter its laptop name.
-4. On the main PC, approve the pending laptop from **Team & laptops**.
+3. Sign in with that account on the second PC. A correct username and password grant access immediately.
 
-Clearing browser cookies or changing browser profiles requires laptop approval again.
+A different browser profile can also sign in, but it gets a separate local shift and printer pairing.
 
 ## 8. Begin the business day
 

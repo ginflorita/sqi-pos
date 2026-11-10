@@ -4,7 +4,7 @@
 
 Version 0.1 implements the core workflows below. See [README](../README.md) for the available scope, [operations](operations.md) for setup, and [verification](verification.md) for tested scenarios and remaining equipment checks. The system supports two cashier users on separate Windows laptops at one active bazaar. A router creates a local network even without internet. Laptop 1 runs the application and keeps SQLite on its internal drive; Laptop 2 connects through a browser. The database file is never opened directly across the network or placed in a synced folder.
 
-Laptop 1 must remain powered on, awake, and connected. If the host, app, or local network is unavailable, checkout stops. There is no independent offline sale queue. Version 0.1 exports Excel-compatible CSV reports; item imports remain planned. Quantities are whole base units and payment is cash. Discounts and added tax are zero pending confirmation of the bazaar's requirements.
+Laptop 1 must remain powered on, awake, and connected. If the host, app, or local network is unavailable, checkout stops. There is no independent offline sale queue. Reports download as formatted Excel workbooks; item imports remain planned. Quantities are whole base units and payment is cash. Discounts and added tax are zero pending confirmation of the bazaar's requirements.
 
 ## Users and permissions
 
@@ -19,7 +19,7 @@ Each person uses a named account; there is no shared cashier or guest account. O
 | Approve voids, returns, stock adjustments, and cash exceptions | No | Yes |
 | Open and close bazaar days; manage backups and settings | No | Yes |
 
-The server checks authorization on every request and checks it again inside financial write transactions after acquiring the write lock. Passwords use salted scrypt hashes; sign-in and manager approval attempts are throttled. Sessions expire after 30 minutes without application activity or 12 hours in total. Background connection checks do not extend idle sessions. Sensitive changes require the manager's password. Only approved terminals may check out. LAN mode requires HTTPS; Windows permissions must protect host data and backups from cashier accounts.
+The server checks authorization on every request and checks it again inside financial write transactions after acquiring the write lock. Passwords use salted scrypt hashes; sign-in and manager approval attempts are throttled. Sessions expire after 30 minutes without application activity or 12 hours in total. Background connection checks do not extend idle sessions. Sensitive changes require the manager's password. A valid account can sign in from any browser without device approval. LAN mode requires HTTPS; Windows permissions must protect host data and backups from cashier accounts.
 
 ## Bazaar days and cashier shifts
 
@@ -58,7 +58,7 @@ Expected cash equals opening cash plus net cash received from sales, less cash r
 
 ## Reports and monitoring
 
-For the active bazaar, the manager can filter sales reports by Day 1/Day 2/etc., business-date span, product, category, cashier, and terminal, alone or together. Reports show transactions, units, gross sales, refunds, net sales, and average sale. Transactions provides source receipts; Inventory shows movement history and low-stock counts; Cashier shifts shows reconciliation and variance. Reprints and account activity appear in Audit trail. Historical item/category snapshots determine historical groupings. Totals come from source records. CSV exports are copies; PDF receipt output uses browser printing. Multi-bazaar selection and direct report-row drilldown are future additions.
+For the active bazaar, the manager can filter sales reports by Day 1/Day 2/etc., business-date span, product, category, and cashier, alone or together. Reports show transactions, units, gross sales, refunds, net sales, and average sale. Transactions provides source receipts; Inventory shows movement history and low-stock counts; Cashier shifts shows reconciliation and variance. Reprints and account activity appear in Audit trail. Historical item/category snapshots determine historical groupings. Totals come from source records. The Excel export has Summary, Days, Items, Category, and Cashier sheets; the CSV endpoint remains available for compatibility. PDF receipt output uses browser printing. Multi-bazaar selection and direct report-row drilldown are future additions.
 
 The audit records user and terminal, host time, action, affected record, result, reason, approval, and relevant before/after values. It includes successful and failed logins, account changes, catalog changes, stock changes, sales, corrections, reprints, day/shift closes, backup failures, and restore actions. It excludes passwords and session secrets. Ordinary users cannot edit audit entries through the app.
 

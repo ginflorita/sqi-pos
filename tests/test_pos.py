@@ -10,7 +10,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from PIL import Image
 
 from pos.app import create_app
@@ -71,13 +71,26 @@ class POSTest(unittest.TestCase):
     def second_cashier(self):
         uid=self.call('/users',{'username':'cashier2','display_name':'Second cashier','role':'cashier','active':True,'password':PASSWORD,'manager_password':PASSWORD}).json['user_id']
         second=self.app.test_client();csrf=second.get('/api/state').json['csrf']
-        self.call('/login',{'username':'cashier2','password':PASSWORD,'terminal_name':'Laptop 2'},client=second,csrf=csrf)
-        self.assertFalse(second.get('/api/state').json['terminal']['approved'])
-        team=self.client.get('/api/team').json
-        terminal=team['terminals'][-1]
-        self.call('/terminals/'+str(terminal['terminal_id']),{'name':'Laptop 2','approved':True,'manager_password':PASSWORD},'PUT')
+        self.call('/login',{'username':'cashier2','password':PASSWORD},client=second,csrf=csrf)
+        state=second.get('/api/state').json
+        self.assertEqual(state['user']['username'],'cashier2')
+        self.assertNotIn('approved',state['terminal'])
+        self.assertEqual(second.get('/api/catalog').status_code,200)
         self.call('/shifts/open',{'opening_cash_minor':50000},client=second,csrf=csrf)
         return second,csrf,uid
+
+    def test_existing_pending_browser_uses_account_access(self):
+        second,csrf,uid=self.second_cashier()
+        terminal_id=second.get('/api/state').json['terminal']['terminal_id']
+        connection=sqlite3.connect(self.database)
+        try:
+            connection.execute('UPDATE terminals SET approved=0 WHERE terminal_id=?',(terminal_id,))
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertEqual(second.get('/api/catalog').status_code,200)
+        self.assertEqual(second.get('/api/state').json['user']['user_id'],uid)
+        self.call('/shifts/close',{'counted_cash_minor':50000},client=second,csrf=csrf)
 
     def test_one_sale_on_double_submit_and_response_loss(self):
         ticket=self.ticket()
@@ -306,6 +319,21 @@ class POSTest(unittest.TestCase):
         self.assertEqual(day1['net_minor'],12550);self.assertEqual(day1['refunds_minor'],0)
         self.assertEqual(day2['net_minor'],-12550)
         self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
+        response=self.client.get('/api/reports?format=xlsx&from=2026-10-19&to=2026-10-20')
+        self.assertEqual(response.status_code,200)
+        self.assertIn('SQI-POS-(2026-10-19-to-2026-10-20).xlsx',response.headers['Content-Disposition'])
+        workbook=load_workbook(io.BytesIO(response.data),read_only=False,data_only=True)
+        try:
+            self.assertEqual(workbook.sheetnames,['Summary','Days','Items','Category','Cashier'])
+            self.assertEqual(workbook['Summary']['B15'].value,0)
+            self.assertEqual(workbook['Days']['J8'].value,125.5)
+            self.assertEqual(workbook['Days']['L9'].value,-125.5)
+            self.assertEqual(workbook['Days']['L10'].value,0)
+            self.assertEqual(workbook['Items']['G8'].value,0)
+            self.assertEqual(workbook['Category']['F8'].value,0)
+            self.assertEqual(workbook['Cashier']['H8'].value,0)
+            self.assertEqual(workbook['Days'].freeze_panes,'B8')
+        finally:workbook.close()
 
     def test_failed_checkout_rolls_back_everything(self):
         self.call('/checkout',self.checkout_body(self.ticket(),tendered=1),expected=400)
@@ -342,8 +370,8 @@ class POSTest(unittest.TestCase):
 
     def test_login_throttling_and_disabled_sessions(self):
         second,csrf,uid=self.second_cashier()
-        for _ in range(5):self.call('/login',{'username':'cashier2','password':'wrong','terminal_name':'Other'},client=second,csrf=csrf,expected=401)
-        self.call('/login',{'username':'cashier2','password':PASSWORD,'terminal_name':'Other'},client=second,csrf=csrf,expected=429)
+        for _ in range(5):self.call('/login',{'username':'cashier2','password':'wrong'},client=second,csrf=csrf,expected=401)
+        self.call('/login',{'username':'cashier2','password':PASSWORD},client=second,csrf=csrf,expected=429)
         self.call('/shifts/close',{'counted_cash_minor':50000},client=second,csrf=csrf)
         self.call('/users/'+str(uid),{'display_name':'Second cashier','role':'cashier','active':False,'password':'','manager_password':PASSWORD},'PUT')
         self.assertEqual(second.get('/api/catalog').status_code,401)
@@ -439,6 +467,22 @@ class POSTest(unittest.TestCase):
         self.assertEqual(self.client.get('/api/reports?category_id='+str(self.category)).json['summary']['transactions'],0)
         csv=self.client.get('/api/reports?format=csv').get_data(as_text=True)
         self.assertIn("'=UNSAFE()",csv)
+        response=self.client.get('/api/reports?format=xlsx&category_id='+str(c))
+        self.assertIn('SQI-POS-(2026-10-19-to-2026-10-19).xlsx',response.headers['Content-Disposition'])
+        workbook=load_workbook(io.BytesIO(response.data))
+        try:
+            self.assertEqual(workbook['Category']['A8'].value,"'=UNSAFE()")
+            self.assertEqual(workbook['Category']['A8'].data_type,'s')
+            self.assertIn('Category: =UNSAFE()',workbook['Summary']['B5'].value)
+        finally:workbook.close()
+        self.assertEqual(self.client.get('/api/reports?format=xlsx&from=2026-10-20&to=2026-10-19').status_code,400)
+        self.assertEqual(self.client.get('/api/reports?format=xlsx&from=20261019').status_code,400)
+        empty=self.client.get('/api/reports?format=xlsx&from=2026-11-01&to=2026-11-02')
+        empty_book=load_workbook(io.BytesIO(empty.data),data_only=True)
+        try:
+            self.assertEqual(empty_book['Summary']['B15'].value,0)
+            self.assertEqual(empty_book['Days']['A8'].value,'No matching sales or refunds.')
+        finally:empty_book.close()
 
     def test_near_duplicate_requires_a_separate_purchase_review(self):
         self.call('/checkout',self.checkout_body(self.ticket()))
@@ -518,9 +562,9 @@ class POSTest(unittest.TestCase):
         for name in self.app.config['POS_COOKIE_NAMES']:
             recovered_client.set_cookie(name,self.client.get_cookie(name).value)
         recovered_csrf=recovered_client.get('/api/state').json['csrf']
-        login=recovered_client.post('/api/login',json={'username':'owner','password':PASSWORD,'terminal_name':'Recovered host'},headers={'X-CSRF-Token':recovered_csrf})
+        login=recovered_client.post('/api/login',json={'username':'owner','password':PASSWORD},headers={'X-CSRF-Token':recovered_csrf})
         self.assertEqual(login.status_code,200,login.get_data(as_text=True))
-        self.assertTrue(recovered_client.get('/api/state').json['terminal']['approved'])
+        self.assertEqual(recovered_client.get('/api/state').json['user']['username'],'owner')
 
 
 if __name__=='__main__':unittest.main()

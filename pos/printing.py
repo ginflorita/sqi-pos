@@ -174,9 +174,9 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
     def helper():
         token = request.headers.get('Authorization', '').removeprefix('Bearer ')
         require(40 <= len(token) <= 100, 'Printer helper authentication required.', 403)
-        row = db().execute('''SELECT p.* FROM receipt_printers p JOIN terminals t USING(terminal_id)
-            WHERE token_hash=? AND t.approved=1''', (digest(token),)).fetchone()
-        require(row, 'Printer pairing was revoked or the laptop is not approved.', 403)
+        row = db().execute('''SELECT p.* FROM receipt_printers p
+            WHERE token_hash=?''', (digest(token),)).fetchone()
+        require(row, 'Printer pairing was revoked.', 403)
         return row
 
     @app.get('/api/receipt-printer')

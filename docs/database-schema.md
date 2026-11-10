@@ -14,7 +14,7 @@ The bold first field is the primary key. `NULL` means optional where stated; exe
 | `bazaars` | **`bazaar_id`**, `name`, `starts_on`, `ends_on`, `timezone`, `currency_code`, `status`, `created_by_user_id`, `created_at` | `created_by_user_id` → `users.user_id`. One active bazaar in the initial deployment. |
 | `bazaar_days` | **`bazaar_day_id`**, `bazaar_id`, `day_number`, `business_date`, `status`, `opened_at`, `opened_by_user_id`, `closed_at`, `closed_by_user_id` | Bazaar/user FKs. Unique day number and business date within a bazaar; only one day open at a time. |
 | `users` | **`user_id`**, `username`, `display_name`, `password_hash`, `role`, `active`, `created_by_user_id`, `created_at`, `disabled_at` | `username` unique; `created_by_user_id` → `users.user_id` and may be NULL for bootstrap. Deactivate rather than delete. |
-| `terminals` | **`terminal_id`**, `name`, `device_key_hash`, `approved`, `approved_by_user_id`, `last_seen_at` | `approved_by_user_id` → `users.user_id`. Only approved terminals may check out. |
+| `terminals` | **`terminal_id`**, `name`, `device_key_hash`, `approved`, `approved_by_user_id`, `last_seen_at` | `approved_by_user_id` → `users.user_id`. Internal browser identity keeps shifts and printer pairing separate. `approved` and `approved_by_user_id` are legacy fields; account sign-in grants access without browser approval. |
 | `auth_sessions` | **`auth_session_id`**, `token_hash`, `user_id`, `terminal_id`, `created_at`, `last_seen_at`, `expires_at` | Unique token hash; user/terminal FKs. Tokens are not stored in plaintext. Sessions have idle and absolute expiry and are revoked on restore. |
 | `login_limits` | **`login_limit_id`**, `bucket_key`, `attempts`, `window_started_at` | Unique bucket per hashed sign-in identifier/address or manager approval account. Persistent throttling state, not transaction history. |
 | `shifts` | **`shift_id`**, `bazaar_day_id`, `cashier_user_id`, `terminal_id`, `opening_cash_minor`, `expected_cash_minor`, `counted_cash_minor`, `variance_minor`, `opened_at`, `closed_at`, `status` | Day, user, and terminal FKs. One open shift per user and terminal. Expected/count/variance are finalized at close; manager closure records its approval and reason in the audit. |
@@ -71,7 +71,7 @@ The bold first field is the primary key. `NULL` means optional where stated; exe
 
 ## Report queries
 
-Reports use application queries over source tables; no named SQL views or independently editable report totals are created in version 0.1. Sales reports group by day, product, historical category, and cashier, with filters for business date, day, product, category, cashier, and laptop. Inventory movement history and shift reconciliation have separate screens.
+Reports use application queries over source tables; no named SQL views or independently editable report totals are created in version 0.1. Sales reports group by day, product, historical category, and cashier, with filters for business date, day, product, category, and cashier. Inventory movement history and shift reconciliation have separate screens.
 
 ## Per-laptop receipt printing
 

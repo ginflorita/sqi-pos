@@ -36,7 +36,7 @@ Use https://localhost:8765 on the host and https://192.168.1.10:8765 on Laptop 2
 
 The owner must allow inbound TCP port 8765 for Python on the Windows Private network profile, restricted to the local subnet. Do not enable internet port forwarding. The application does not change firewall or certificate trust settings automatically.
 
-Create the second cashier in Team & laptops. Sign in on Laptop 2 and name it. The host manager approves the pending laptop. Unapproved laptops cannot access the catalog or checkout. Clearing cookies or switching profiles requires approval again. Only one shift per cashier and laptop may be open.
+Create the second cashier in Team. Sign in on Laptop 2 with that account; no laptop name or approval is needed. Each browser profile keeps its own shift and printer pairing. Only one shift per cashier and browser profile may be open.
 
 ## Checkout fullscreen
 
@@ -75,7 +75,7 @@ Managers can open original receipts in Transactions to return items or void the 
 
 The return form automatically shows each item's refund and **Refund to customer** as quantities change: return quantity × original selling price, summed across selected items. Restock quantity only changes inventory and does not change the refund. Invalid or excessive return quantities show a validation message instead of a misleading total. Review the amount before **Record correction**; the server calculates and validates the saved refund, and the cashier physically gives the cash to the customer.
 
-If a cashier's laptop is unavailable, the manager can use **Cashier shifts → Manager close** from an approved laptop. Count the physical drawer, record a reason, and confirm the manager password. If the shift has an unpaid order, review its items and explicitly confirm cancellation; a changed order requires a fresh review. The server serializes closure against checkout and records both cancellation and closure in the audit. This allows a lost-laptop shift to be reconciled without rewriting its sales.
+If a cashier's laptop is unavailable, the manager can use **Cashier shifts → Manager close** from a signed-in browser. Count the physical drawer, record a reason, and confirm the manager password. If the shift has an unpaid order, review its items and explicitly confirm cancellation; a changed order requires a fresh review. The server serializes closure against checkout and records both cancellation and closure in the audit. This allows a lost-laptop shift to be reconciled without rewriting its sales.
 
 ## Backups
 
@@ -107,14 +107,7 @@ The tool verifies integrity, foreign keys, schema version, and stock reconciliat
 
 Compare receipt counts, last receipt, stock, and shifts against the backup point. For practice, use a separate port and do not trade from the restored copy. For actual recovery, add normal LAN certificate flags after verification. Sales after the backup are absent; reconcile paper receipts and cash before resuming without blindly re-entering receipts that already exist.
 
-The database's instance identity survives restore, so a retained device cookie still identifies an approved browser at the same hostname. If the host/browser has been replaced, sign in once to register its pending laptop, then stop the server. An owner with local filesystem access can list terminals and approve the replacement using an existing active manager password:
-
-```powershell
-python tools/approve_terminal.py --data-dir F:\BazaarRecovered
-python tools/approve_terminal.py --data-dir F:\BazaarRecovered --terminal-id 3 --username owner
-```
-
-Replace the ID and username with the pending terminal and actual manager account. The tool prompts for the password and explicit confirmation, then records a recovery-approval audit event. Restart and sign in. Reconcile any shift left on the unavailable laptop through Manager close before opening a new shift for that cashier.
+Sign in to the restored server with a valid account. A replacement browser does not require laptop approval. Re-pair its printer if automatic printing is used. Reconcile any shift left on the unavailable laptop through Manager close before opening a new shift for that cashier.
 
 ## Equipment readiness
 

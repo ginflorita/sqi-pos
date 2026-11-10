@@ -24,6 +24,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .db import audit, connect, digest, initialize, now, transaction as database_transaction
+from .report_export import export_report
 
 
 class Problem(Exception):
@@ -127,7 +128,6 @@ def signed_in(manager=False):
         @wraps(fn)
         def wrapped(*args, **kwargs):
             require(g.user is not None, 'Please sign in.', 401)
-            require(g.terminal['approved'], 'This laptop is waiting for manager approval.', 403)
             require(not manager or g.user['role'] == 'manager', 'Manager access is required.', 403)
             return fn(*args, **kwargs)
         return wrapped
@@ -164,17 +164,17 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @contextmanager
     def transaction(connection):
         with database_transaction(connection):
-            # Recheck access after acquiring the write lock. A user or laptop may
+            # Recheck account access after acquiring the write lock. A user may
             # have been disabled while this request was waiting for another sale.
             if has_request_context() and connection is getattr(g, 'db', None) and g.user and request.path not in ('/api/login','/api/setup','/api/logout'):
-                live=connection.execute('''SELECT u.active,u.role,u.password_hash,t.approved,a.expires_at,a.last_seen_at
-                    FROM auth_sessions a JOIN users u USING(user_id) JOIN terminals t USING(terminal_id)
+                live=connection.execute('''SELECT u.active,u.role,u.password_hash,a.expires_at,a.last_seen_at
+                    FROM auth_sessions a JOIN users u USING(user_id)
                     WHERE a.auth_session_id=? AND a.user_id=? AND a.terminal_id=?''',
                     (g.auth_session,g.user['user_id'],g.terminal['terminal_id'])).fetchone()
                 epoch=int(time.time())
-                require(live and live['active'] and live['approved'] and live['role']==g.user['role']
+                require(live and live['active'] and live['role']==g.user['role']
                         and live['expires_at']>epoch and epoch-live['last_seen_at']<1800,
-                        'Your account or laptop access changed. Sign in again before continuing.',403)
+                        'Your account access changed. Sign in again before continuing.',403)
                 g.user['password_hash']=live['password_hash']
             yield connection
 
@@ -245,13 +245,13 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         token = request.cookies.get(session_cookie, '')
         if token:
             row = db().execute('''SELECT a.*,u.username,u.display_name,u.password_hash,u.role,u.active,
-                t.name terminal_name,t.approved,t.device_key_hash FROM auth_sessions a JOIN users u USING(user_id)
+                t.device_key_hash FROM auth_sessions a JOIN users u USING(user_id)
                 JOIN terminals t USING(terminal_id) WHERE a.token_hash=?''', (digest(token),)).fetchone()
             epoch = int(time.time())
             device = request.cookies.get(device_cookie, '')
             if row and row['active'] and row['expires_at'] > epoch and epoch - row['last_seen_at'] < 1800 and secrets.compare_digest(row['device_key_hash'], digest(device)):
                 g.user = dict(row)
-                g.terminal = {'terminal_id': row['terminal_id'], 'name': row['terminal_name'], 'approved': row['approved']}
+                g.terminal = {'terminal_id': row['terminal_id']}
                 g.auth_session = row['auth_session_id']
                 if request.path != '/api/state' and epoch - row['last_seen_at'] >= 30:
                     db().execute('UPDATE auth_sessions SET last_seen_at=? WHERE auth_session_id=?', (epoch, g.auth_session))
@@ -303,24 +303,23 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                   'user': None, 'terminal': g.terminal, 'bazaar': None, 'day': None, 'shift': None}
         if g.user:
             result['user'] = {k: g.user[k] for k in ('user_id', 'username', 'display_name', 'role')}
-            if g.terminal['approved']:
-                bazaar = db().execute("SELECT * FROM bazaars WHERE status='active'").fetchone()
-                day = db().execute("SELECT * FROM bazaar_days WHERE status='open'").fetchone()
-                s = db().execute("SELECT * FROM shifts WHERE cashier_user_id=? AND terminal_id=? AND status='open'", (g.user['user_id'], g.terminal['terminal_id'])).fetchone()
-                result.update(bazaar=dict(bazaar) if bazaar else None, day=dict(day) if day else None, shift=dict(s) if s else None)
-                result['backup'] = dict(r) if (r := db().execute('SELECT * FROM backup_runs ORDER BY backup_run_id DESC LIMIT 1').fetchone()) else None
+            bazaar = db().execute("SELECT * FROM bazaars WHERE status='active'").fetchone()
+            day = db().execute("SELECT * FROM bazaar_days WHERE status='open'").fetchone()
+            s = db().execute("SELECT * FROM shifts WHERE cashier_user_id=? AND terminal_id=? AND status='open'", (g.user['user_id'], g.terminal['terminal_id'])).fetchone()
+            result.update(bazaar=dict(bazaar) if bazaar else None, day=dict(day) if day else None, shift=dict(s) if s else None)
+            result['backup'] = dict(r) if (r := db().execute('SELECT * FROM backup_runs ORDER BY backup_run_id DESC LIMIT 1').fetchone()) else None
         return jsonify(result)
 
-    def establish(user_id, terminal_name, approve=False):
+    def establish(user_id, terminal_name):
         device = request.cookies.get(device_cookie) or secrets.token_urlsafe(32)
         row = db().execute('SELECT * FROM terminals WHERE device_key_hash=?', (digest(device),)).fetchone()
         if not row:
             tid = db().execute('INSERT INTO terminals(name,device_key_hash,approved,approved_by_user_id,last_seen_at) VALUES(?,?,?,?,?)',
-                               (terminal_name, digest(device), int(approve), user_id if approve else None, now())).lastrowid
-            audit(db(), 'terminal.registered', 'terminals', tid, actor=user_id, terminal=tid, after={'approved': approve, 'name': terminal_name})
+                               (terminal_name, digest(device), 1, None, now())).lastrowid
+            audit(db(), 'terminal.registered', 'terminals', tid, actor=user_id, terminal=tid, after={'name': terminal_name})
         else:
             tid = row['terminal_id']
-            db().execute('UPDATE terminals SET last_seen_at=? WHERE terminal_id=?',(now(),tid))
+            db().execute('UPDATE terminals SET approved=1,approved_by_user_id=NULL,last_seen_at=? WHERE terminal_id=?',(now(),tid))
         token, epoch = secrets.token_urlsafe(48), int(time.time())
         old = request.cookies.get(session_cookie)
         if old:
@@ -357,7 +356,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             bid = db().execute('INSERT INTO bazaars(name,starts_on,timezone,currency_code,status,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?)',
                                (name, datetime.now(ZoneInfo(tz)).date().isoformat(), tz, currency, 'active', uid, now())).lastrowid
             audit(db(), 'setup.completed', 'bazaars', bid, actor=uid, after={'name': name, 'currency': currency, 'timezone': tz})
-            response = establish(uid, 'Host laptop', True)
+            response = establish(uid, 'Manager browser')
         return response
 
     @app.post('/api/login')
@@ -366,7 +365,6 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         username = text_field(data, 'username', 50).lower()
         password = data.get('password', '')
         require(isinstance(password, str) and len(password) <= 1024, 'Invalid sign-in details.')
-        terminal_name = text_field(data, 'terminal_name', 80)
         keys = ['ip:' + digest(request.remote_addr or ''), 'user:' + digest(username)]
         with transaction(db()):
             epoch = int(time.time())
@@ -384,7 +382,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 response = jsonify(error='The username or password is incorrect.'), 401
             else:
                 db().execute('DELETE FROM login_limits WHERE bucket_key=?', (keys[1],))
-                response = establish(user['user_id'], terminal_name)
+                response = establish(user['user_id'], (user['display_name'] + ' browser')[:80])
         return response
 
     app.config['DUMMY_HASH'] = generate_password_hash(secrets.token_urlsafe(32), method='scrypt')
@@ -1001,8 +999,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @app.get('/api/team')
     @signed_in(True)
     def team_get():
-        return jsonify(users=[dict(r) for r in db().execute('SELECT user_id,username,display_name,role,active,created_at FROM users ORDER BY user_id')],
-                       terminals=[dict(r) for r in db().execute('SELECT terminal_id,name,approved,last_seen_at FROM terminals ORDER BY terminal_id')])
+        return jsonify(users=[dict(r) for r in db().execute('SELECT user_id,username,display_name,role,active,created_at FROM users ORDER BY user_id')])
 
     @app.post('/api/users')
     @app.put('/api/users/<int:uid>')
@@ -1034,22 +1031,6 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             event('account.saved','users',uid,after={'display_name':name,'role':role,'active':data.get('active',True),'password_changed':bool(password)},approved=g.user['user_id'])
         return jsonify(user_id=uid)
 
-    @app.put('/api/terminals/<int:tid>')
-    @signed_in(True)
-    def terminal_save(tid):
-        data=payload()
-        reauth(data)
-        require(type(data.get('approved')) is bool,'Invalid terminal approval.')
-        name=text_field(data,'name',80)
-        with transaction(db()):
-            require(db().execute('SELECT 1 FROM terminals WHERE terminal_id=?',(tid,)).fetchone(),'Terminal not found.',404)
-            require(tid!=g.terminal['terminal_id'] or data['approved'],'You cannot revoke the laptop you are using.')
-            if not data['approved']:
-                require(not db().execute("SELECT 1 FROM shifts WHERE terminal_id=? AND status='open'",(tid,)).fetchone(),'Close this laptop’s shift before revoking it.',409)
-            db().execute('UPDATE terminals SET name=?,approved=?,approved_by_user_id=? WHERE terminal_id=?',(name,int(data['approved']),g.user['user_id'],tid))
-            event('terminal.approval_changed','terminals',tid,after={'name':name,'approved':data['approved']},approved=g.user['user_id'])
-        return jsonify(ok=True)
-
     @app.get('/api/filters')
     @signed_in()
     def filters():
@@ -1068,8 +1049,9 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         for arg,op in [('from','>='),('to','<=')]:
             value=request.args.get(arg)
             if value:
-                try: date.fromisoformat(value)
+                try: parsed=date.fromisoformat(value)
                 except ValueError: raise Problem('Invalid report date.')
+                require(value==parsed.isoformat(),'Use YYYY-MM-DD for report dates.')
                 clauses.append(f'{day_alias}.business_date{op}?'); params.append(value)
         if request.args.get('terminal_id'):
             value=request.args['terminal_id']
@@ -1096,12 +1078,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         where,params=report_filters()
         sales_rows=db().execute('''SELECT s.sale_id,s.cashier_user_id,s.terminal_id,s.completed_at,d.day_number,d.business_date,u.display_name,
             l.* FROM sales s JOIN sale_lines l USING(sale_id) JOIN bazaar_days d USING(bazaar_day_id)
-            JOIN users u ON u.user_id=s.cashier_user_id'''+where,params).fetchall()
+            JOIN users u ON u.user_id=s.cashier_user_id'''+where+' ORDER BY s.sale_id,l.sale_line_id',params).fetchall()
         cw,cp=report_filters('c','l','d',True)
         refunds=db().execute('''SELECT c.*,cl.quantity,cl.refund_minor,l.product_id,l.sku_snapshot,l.description_snapshot,l.category_name_snapshot,
             u.display_name,d.day_number,d.business_date,sh.terminal_id FROM sale_corrections c JOIN correction_lines cl USING(sale_correction_id)
             JOIN sale_lines l USING(sale_line_id) JOIN bazaar_days d ON d.bazaar_day_id=c.bazaar_day_id
-            JOIN users u ON u.user_id=c.created_by_user_id JOIN shifts sh ON sh.shift_id=c.shift_id'''+cw,cp).fetchall()
+            JOIN users u ON u.user_id=c.created_by_user_id JOIN shifts sh ON sh.shift_id=c.shift_id'''+cw+' ORDER BY c.sale_correction_id,cl.correction_line_id',cp).fetchall()
         gross=sum(r['quantity']*r['unit_price_minor'] for r in sales_rows)
         total=sum(r['line_total_minor'] for r in sales_rows)
         refund=sum(r['refund_minor'] for r in refunds)
@@ -1118,6 +1100,38 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         for group in groups:
             groups[group]=sorted(groups[group].values(),key=lambda r:r['sales_minor']-r['refunds_minor'],reverse=True)
         result={'summary':{'transactions':len({r['sale_id'] for r in sales_rows}),'units':sum(r['quantity'] for r in sales_rows),'returned_units':sum(r['quantity'] for r in refunds),'gross_minor':gross,'discount_minor':sum(r['discount_minor'] for r in sales_rows),'tax_minor':sum(r['tax_minor'] for r in sales_rows),'sales_minor':total,'refunds_minor':refund,'net_minor':total-refund},**groups}
+        start_arg,end_arg=request.args.get('from'),request.args.get('to')
+        require(not (start_arg and end_arg and start_arg>end_arg),'Report start date must be on or before the end date.')
+        day_clauses=[];day_params=[]
+        if request.args.get('day_id'):
+            day_clauses.append('bazaar_day_id=?');day_params.append(int(request.args['day_id']))
+        if start_arg:
+            day_clauses.append('business_date>=?');day_params.append(start_arg)
+        if end_arg:
+            day_clauses.append('business_date<=?');day_params.append(end_arg)
+        business_days=db().execute('SELECT day_number,business_date FROM bazaar_days'+(' WHERE '+' AND '.join(day_clauses) if day_clauses else '')+' ORDER BY business_date',day_params).fetchall()
+        bazaar=db().execute("SELECT currency_code,timezone FROM bazaars WHERE status='active'").fetchone()
+        listed_dates=[r['business_date'] for r in business_days]
+        listed_dates.extend(r['business_date'] for r in sales_rows)
+        listed_dates.extend(r['business_date'] for r in refunds)
+        today=datetime.now(ZoneInfo(bazaar['timezone'])).date().isoformat()
+        first=min(listed_dates) if listed_dates else today
+        last=max(listed_dates) if listed_dates else today
+        start=start_arg or min(first,end_arg or first)
+        end=end_arg or max(last,start_arg or last)
+        filename=f'SQI-POS-({start}-to-{end})'
+        if request.args.get('format')=='xlsx':
+            scope=[]
+            for key,table,id_column,label_column,prefix in (
+                ('day_id','bazaar_days','bazaar_day_id','day_number','Day'),
+                ('user_id','users','user_id','display_name','Cashier'),
+                ('category_id','categories','category_id','name','Category'),
+                ('product_id','products','product_id','sku','Item')):
+                if value:=request.args.get(key):
+                    record=db().execute(f'SELECT {label_column} FROM {table} WHERE {id_column}=?',(int(value),)).fetchone()
+                    scope.append(f'{prefix}: {record[label_column] if record else value}')
+            report_file=export_report(result,sales_rows,refunds,business_days,start,end,bazaar['currency_code'],' · '.join(scope) if scope else 'All sales')
+            return send_file(report_file,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',as_attachment=True,download_name=filename+'.xlsx')
         if request.args.get('format')=='csv':
             out=io.StringIO(newline='');writer=csv.writer(out)
             writer.writerow(['Group','Description','Units sold','Units returned','Sales (minor units)','Refunds (minor units)','Net (minor units)'])
@@ -1126,7 +1140,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                     label=r['label']
                     if label.startswith(('=','+','-','@','\t','\r')): label="'"+label
                     writer.writerow([group,label,r['units'],r['returned_units'],r['sales_minor'],r['refunds_minor'],r['sales_minor']-r['refunds_minor']])
-            response=make_response('\ufeff'+out.getvalue());response.mimetype='text/csv';response.headers['Content-Disposition']='attachment; filename=bazaar-report.csv'
+            response=make_response('\ufeff'+out.getvalue());response.mimetype='text/csv';response.headers['Content-Disposition']=f'attachment; filename="{filename}.csv"'
             return response
         return jsonify(result)
 

@@ -12,7 +12,7 @@ Each cashier laptop remembers its own application printer. No printer purchase i
 6. Check a saved receipt and use **Print another copy** to verify physical output and paper size before trading. This is an additional paper copy, recorded in history. No test page is sent automatically.
 7. On the POS host laptop, a cashier can use **Connect printer** in Checkout whenever the helper is offline. It starts in the background without an Administrator prompt. Repeat the one-time setup on a second laptop with its own browser pairing and USB printer; that laptop still starts `Start-Print-Helper.cmd` locally because a remote browser cannot launch a Windows program. Once configured, the helper reuses `.print-helper/config.json` without asking again. To change the POS address or pairing, run `Start-Print-Helper.cmd --setup`.
 
-Use the same browser profile for the approved cashier laptop. A new browser profile is a different POS terminal and needs separate approval and pairing. A manager can sign out after setup and the cashier can sign in in the same profile.
+Use the same browser profile for a cashier computer. A new browser profile needs its own printer pairing. A manager can sign out after setup and the cashier can sign in in the same profile.
 
 ## Checkout
 
@@ -20,7 +20,7 @@ Use the same browser profile for the approved cashier laptop. A new browser prof
 - If the helper is offline on the host laptop, **Connect printer** is available both at the top of Checkout and in the payment confirmation. Repeated clicks cannot start competing helper processes.
 - The laptop helper pulls the job and sends the receipt, including the SQI logo and company details, to the saved Windows printer. No browser print dialog is opened.
 - The receipt displays print status. **Queued** waits for the helper; **claimed** means it was handed to the helper; **submitted** means Windows accepted the document, not proof that paper came out. Driver, USB, paper, and printer errors still need physical checks.
-- The helper contacts the host, so the browser does not need special localhost/network permissions or a browser extension. Printer credentials are separate from cashier sessions and remain scoped to one approved laptop.
+- The helper contacts the host, so the browser does not need special localhost/network permissions or a browser extension. Printer credentials are separate from cashier sessions and remain scoped to one browser profile.
 - Without completed setup, **Print / save PDF** remains available using the browser dialog.
 
 ## Interrupted printing and copies
@@ -31,7 +31,7 @@ Queued jobs are durable and print when the helper reconnects. A claimed job is n
 
 Browser printing and additional helper copies are blocked while a job for that sale is pending. Deliberate additional copies after completion are allowed and audited. No application can guarantee physical exactly-once paper output when the spooler/device acknowledgement is lost; the conservative review step prevents blind automatic retries.
 
-Keep `.print-helper/config.json` private: it contains this laptop's helper token. Pairing again revokes the previous token and turns automatic printing off until configured again. Revoking a POS laptop also blocks its helper. Restore disables printer pairing and closes pending jobs from the snapshot, preventing old receipts from replaying after recovery. Re-pair both laptops after restoring.
+Keep `.print-helper/config.json` private: it contains this laptop's helper token. Pairing again revokes the previous token and turns automatic printing off until configured again. Restore disables printer pairing and closes pending jobs from the snapshot, preventing old receipts from replaying after recovery. Re-pair both laptops after restoring.
 
 ## Supported scope and verification
 

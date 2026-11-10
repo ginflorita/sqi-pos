@@ -12,10 +12,10 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 | Inventory | Opening stock, stock in/out, physical counts, adjustments, and movement history |
 | Checkout | Optional fullscreen with no sidebar, name/SKU/barcode search, a dedicated scanner or manual barcode field with quantity confirmation before adding, saved tickets, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
-| Accounts | Named managers/cashiers, laptop approval, password confirmation for sensitive changes, and expiring sessions |
+| Accounts | Named managers/cashiers, account-only sign-in, password confirmation for sensitive changes, and expiring sessions |
 | Bazaar days | Day 1, Day 2, etc., cashier shifts, opening/closing cash counts, and cash variance |
 | Corrections | Manager-approved returns/voids, live refund calculation from original sale prices, explicit restocking, and cash in/out |
-| Reports | Business-date span, day, product, category, cashier, and laptop filters, with Excel-compatible CSV exports |
+| Reports | Business-date span, day, product, category, and cashier filters, with a formatted Excel workbook export |
 | Audit and recovery | Append-only audit events, verified database backups, and restore into a new folder |
 
 ## Requirements
@@ -79,7 +79,7 @@ Adding stock through **Stock in** or **Opening stock** needs no manual reason: a
 | Main PC | Runs the server, holds the database, and can also operate a cashier browser |
 | Second PC | Opens the host's POS address in its browser and signs in with its own cashier account |
 
-Follow the **[Two-PC setup guide](docs/two-pc-setup.md)** to create and trust the local HTTPS certificate, allow the private-network connection through Windows Firewall, and approve the second laptop.
+Follow the **[Two-PC setup guide](docs/two-pc-setup.md)** to create and trust the local HTTPS certificate, allow the private-network connection through Windows Firewall, and connect the second laptop.
 
 After certificate setup, stop the existing server and start LAN mode:
 
@@ -99,6 +99,10 @@ The main PC uses `https://localhost:8765`; the second PC uses `https://<MAIN-PC-
 6. Review reports, close the business day, and check that its backup succeeded.
 
 After an uncertain payment response, refresh the same browser to check the existing ticket. It retrieves the original receipt when the sale committed. Use one ticket for each physical customer purchase.
+
+### Sales report export
+
+In **Reports**, choose the date range and any day, cashier, category, or item filters, then click **Download Excel report**. The file is named `SQI-POS-(YYYY-MM-DD-to-YYYY-MM-DD).xlsx`. Its **Summary** sheet shows overall sales and daily net sales. **Days** shows receipts, units, gross sales, discounts, tax, refunds, and net sales by business day. **Items**, **Category**, and **Cashier** each have their own breakdown and totals. Refunds appear on the day they were processed and under the cashier who processed them. Sales exclude cash in/out and drawer variance; use **Cashier shifts** for cash reconciliation.
 
 ### Barcode scanners and manual search
 
@@ -135,7 +139,7 @@ Create sample products and sales in a separate `.demo/` database:
 .\Start-POS.cmd --data-dir .demo --backup-dir .demo/backups --port 8766
 ```
 
-Open **http://localhost:8766**. Demo credentials are `demo` / `Bazaar-demo-2026!`; they apply only to the sample workspace. A new demo browser still needs laptop approval; the recovery-approval tool is described in Operations. Sample data is kept separate from the production database.
+Open **http://localhost:8766**. Demo credentials are `demo` / `Bazaar-demo-2026!`; they apply only to the sample workspace. Any browser can sign in with a valid account; no laptop approval is required. Sample data is kept separate from the production database.
 
 ## Current scope
 
