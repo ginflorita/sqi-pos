@@ -72,7 +72,7 @@ cd "C:\SQI-POS"
 .\Start-POS.cmd --lan --cert certs/pos.crt --key certs/pos.key
 ```
 
-Keep the server running while either PC uses the POS. After verifying HTTPS, stop the manual server with **Ctrl+C**, then double-click **Setup-Host-Shortcut.cmd** once on the main laptop. It creates an **SQI POS** desktop icon and a Windows sign-in startup shortcut for the server. The icon starts LAN HTTPS automatically when `certs/pos.crt` and `certs/pos.key` are present, then opens the browser.
+Keep the server running while either PC uses the POS. After verifying HTTPS, stop the manual server with **Ctrl+C**, then double-click **Setup-Host-Shortcut.cmd** once on the main laptop. It creates a **Start SQI POS** desktop icon and a Windows sign-in startup shortcut for the server. The icon starts LAN HTTPS automatically when `certs/pos.crt` and `certs/pos.key` are present, then opens the browser.
 
 ## 5. Allow the local connection through Windows Firewall
 
@@ -114,9 +114,9 @@ The second laptop can use a downloaded copy of the application source for the he
 ## 10. Daily startup and shutdown
 
 1. Connect both laptops to the same router.
-2. Sign in to Windows on the main laptop. The startup shortcut starts the server automatically; its desktop **SQI POS** icon also starts it if needed. Keep the laptop awake and plugged in.
+2. Sign in to Windows on the main laptop. The startup shortcut starts the server automatically; its desktop **Start SQI POS** icon also starts it if needed. Keep the laptop awake and plugged in.
 3. If using automatic printing, run `Start-Print-Helper.cmd` on each laptop.
-4. Double-click the **SQI POS** desktop icon on each laptop. Sign in, open the business day, and open each cashier's shift.
+4. Double-click **Start SQI POS** on the main laptop and the **SQI POS** browser shortcut on the second laptop. Sign in, open the business day, and open each cashier's shift.
 5. At closing, finish orders, reconcile and close shifts, close the business day, and verify the backup. Keep an additional recovery copy on a separate drive.
 
 ## Updating application files later

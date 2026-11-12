@@ -8,6 +8,7 @@ import ssl
 import subprocess
 import tempfile
 import time
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
@@ -112,6 +113,11 @@ def main():
                     print(result['error_message'])
         except KeyboardInterrupt:
             break
+        except HTTPError as error:
+            if error.code == 403:
+                print('Printer pairing revoked. Pair this laptop again in POS Settings to reconnect.')
+                break
+            print('Print helper waiting for connection:', str(error)[:160])
         except Exception as error:
             print('Print helper waiting for connection:', str(error)[:160])
         time.sleep(2)

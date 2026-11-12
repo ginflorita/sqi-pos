@@ -9,6 +9,6 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Setup complete. The desktop SQI POS icon opens the counter.
+echo Setup complete. The desktop Start SQI POS icon starts the server and opens the counter.
 echo The server will start when this Windows user signs in.
 pause

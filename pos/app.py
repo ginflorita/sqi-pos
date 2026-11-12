@@ -37,11 +37,12 @@ def require(condition, message, status=400):
         raise Problem(message, status)
 
 
-def text_field(data, name, limit=200, optional=False):
+def text_field(data, name, limit=200, optional=False, label=None):
     value = data.get(name, '')
-    require(isinstance(value, str), f'{name.replace("_", " ")} must be text.')
+    display_name = label or name.replace('_', ' ')
+    require(isinstance(value, str), f'{display_name} must be text.')
     value = value.strip()
-    require((optional or bool(value)) and len(value) <= limit, f'Enter {name.replace("_", " ")} (maximum {limit} characters).')
+    require((optional or bool(value)) and len(value) <= limit, f'Enter {display_name} (maximum {limit} characters).')
     require(not any(ord(c) < 32 for c in value), 'Control characters are not allowed.')
     return value
 
@@ -50,6 +51,30 @@ def integer(data, name, minimum=0, maximum=100_000_000_00):
     value = data.get(name)
     require(type(value) is int and minimum <= value <= maximum, f'Invalid {name.replace("_", " ")}.')
     return value
+
+
+def allocate_discount(lines, percent_bp):
+    """Allocate an order discount in cents while leaving every unit refundable."""
+    gross = [line['quantity'] * line['amount_minor'] for line in lines]
+    capacity = [amount - line['quantity'] for amount, line in zip(gross, lines)]
+    total_capacity = sum(capacity)
+    total_discount = min((sum(gross) * percent_bp + 5000) // 10000, total_capacity)
+    if not total_discount:
+        return [0] * len(lines)
+    portions = [total_discount * available for available in capacity]
+    discounts = [portion // total_capacity for portion in portions]
+    remaining = total_discount - sum(discounts)
+    order = sorted(range(len(lines)), key=lambda index: (-(portions[index] % total_capacity), index))
+    for index in order[:remaining]:
+        discounts[index] += 1
+    return discounts
+
+
+def refund_for_quantity(line, already_returned, quantity):
+    """Refund the actual paid line amount, distributing odd cents across units."""
+    total = line['line_total_minor']
+    sold = line['quantity']
+    return (already_returned + quantity) * total // sold - already_returned * total // sold
 
 
 def excel_text(value):
@@ -128,7 +153,7 @@ def signed_in(manager=False):
         @wraps(fn)
         def wrapped(*args, **kwargs):
             require(g.user is not None, 'Please sign in.', 401)
-            require(not manager or g.user['role'] == 'manager', 'Manager access is required.', 403)
+            require(not manager or g.user['role'] in ('manager', 'it_admin'), 'Manager access is required.', 403)
             return fn(*args, **kwargs)
         return wrapped
     return decorator
@@ -190,12 +215,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
 
     def active_bazaar():
         row = db().execute("SELECT * FROM bazaars WHERE status='active'").fetchone()
-        require(row, 'Create the bazaar on the host laptop first.', 409)
+        require(row, 'Set up the POS on the main laptop first.', 409)
         return row
 
     def active_day():
         row = db().execute("SELECT * FROM bazaar_days WHERE status='open'").fetchone()
-        require(row, 'A manager must open a bazaar day first.', 409)
+        require(row, 'A manager must open a business day first.', 409)
         return row
 
     def shift():
@@ -206,7 +231,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         return row
 
     def reauth(data):
-        require(g.user and g.user['role'] == 'manager', 'Manager access is required.', 403)
+        require(g.user and g.user['role'] in ('manager', 'it_admin'), 'Manager access is required.', 403)
         password = data.get('manager_password', '')
         require(isinstance(password, str) and len(password) <= 1024, 'Manager password is required.', 403)
         key = f'reauth:{g.user["user_id"]}'
@@ -253,7 +278,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 g.user = dict(row)
                 g.terminal = {'terminal_id': row['terminal_id']}
                 g.auth_session = row['auth_session_id']
-                if request.path != '/api/state' and epoch - row['last_seen_at'] >= 30:
+                background_read = request.method == 'GET' and request.path == '/api/catalog' and request.args.get('background') == '1'
+                if request.path != '/api/state' and not background_read and epoch - row['last_seen_at'] >= 30:
                     db().execute('UPDATE auth_sessions SET last_seen_at=? WHERE auth_session_id=?', (epoch, g.auth_session))
 
     @app.after_request
@@ -341,7 +367,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         password = text_field(data, 'password', 1024)
         require(len(password) >= 12, 'Use a password of at least 12 characters.')
         display = text_field(data, 'display_name', 80)
-        name = text_field(data, 'bazaar_name', 120)
+        name = text_field(data, 'bazaar_name', 120, label='business name')
         tz = text_field(data, 'timezone', 80)
         try:
             ZoneInfo(tz)
@@ -352,7 +378,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         with transaction(db()):
             require(not db().execute('SELECT 1 FROM users LIMIT 1').fetchone(), 'Setup is already complete.', 409)
             uid = db().execute('INSERT INTO users(username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?)',
-                               (username, display, generate_password_hash(password, method='scrypt'), 'manager', now())).lastrowid
+                               (username, display, generate_password_hash(password, method='scrypt'), 'it_admin' if username == 'ginflorita' else 'manager', now())).lastrowid
             bid = db().execute('INSERT INTO bazaars(name,starts_on,timezone,currency_code,status,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?)',
                                (name, datetime.now(ZoneInfo(tz)).date().isoformat(), tz, currency, 'active', uid, now())).lastrowid
             audit(db(), 'setup.completed', 'bazaars', bid, actor=uid, after={'name': name, 'currency': currency, 'timezone': tz})
@@ -401,10 +427,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @signed_in()
     def catalog():
         products = db().execute('''SELECT p.*,c.name category_name,b.quantity_on_hand,pr.price_id,pr.amount_minor,
-            i.product_image_id FROM products p JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
+            pr.amount_minor AS selling_price_minor,
+            i.product_image_id,EXISTS(SELECT 1 FROM stock_movements m WHERE m.product_id=p.product_id) has_stock_history
+            FROM products p JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
             LEFT JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
             LEFT JOIN product_images i ON i.product_id=p.product_id AND i.superseded_at IS NULL ORDER BY p.description''').fetchall()
-        drafts = db().execute('SELECT * FROM product_import_drafts ORDER BY description').fetchall() if g.user['role'] == 'manager' else []
+        drafts = db().execute('SELECT * FROM product_import_drafts ORDER BY description').fetchall() if g.user['role'] in ('manager', 'it_admin') else []
         return jsonify(products=[dict(r) for r in products], drafts=[dict(r) for r in drafts],
                        categories=[dict(r) for r in db().execute('SELECT * FROM categories ORDER BY name')])
 
@@ -474,13 +502,18 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         if draft_id is not None:
             require(type(draft_id) is int and draft_id > 0 and product_id is None, 'Invalid imported product.')
         fields = [text_field(data, 'sku', 60), text_field(data, 'barcode', 80, True) or None,
-                  text_field(data, 'description', 200), integer(data, 'category_id', 1), text_field(data, 'unit', 20)]
+                  text_field(data, 'description', 200), text_field(data, 'short_description', 120, True),
+                  integer(data, 'category_id', 1), text_field(data, 'unit', 20),
+                  text_field(data, 'unit_description', 80, True)]
         require(type(data.get('active', True)) is bool, 'Invalid product status.')
-        amount = integer(data, 'amount_minor', 1)
+        amount = integer(data, 'selling_price_minor' if 'selling_price_minor' in data else 'amount_minor', 1)
+        if 'selling_price_minor' in data and 'amount_minor' in data:
+            require(amount == integer(data, 'amount_minor', 1), 'Selling price values do not match.')
+        unit_amount = integer(data, 'unit_price_minor', 1) if 'unit_price_minor' in data else amount
         opening_quantity = integer(data, 'quantity', 0, 1_000_000) if product_id is None and 'quantity' in data else 0
         stock_request_key = request_key(data) if opening_quantity else None
         with transaction(db()):
-            require(db().execute('SELECT 1 FROM categories WHERE category_id=? AND active=1', (fields[3],)).fetchone(), 'Choose an active category.')
+            require(db().execute('SELECT 1 FROM categories WHERE category_id=? AND active=1', (fields[4],)).fetchone(), 'Choose an active category.')
             draft = None
             if draft_id is not None:
                 draft = db().execute('SELECT * FROM product_import_drafts WHERE product_import_draft_id=?', (draft_id,)).fetchone()
@@ -489,13 +522,18 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             if product_id:
                 old = db().execute('SELECT * FROM products WHERE product_id=?', (product_id,)).fetchone()
                 require(old, 'Product not found.', 404)
+                require('unit_price_minor' not in data or unit_amount == old['unit_price_minor'],
+                        'The company unit price is locked and cannot be changed.', 409)
                 before = dict(old)
-                db().execute('UPDATE products SET sku=?,barcode=?,description=?,category_id=?,unit=?,active=? WHERE product_id=?', (*fields, int(data.get('active', True)), product_id))
+                db().execute('UPDATE products SET sku=?,barcode=?,description=?,short_description=?,category_id=?,unit=?,unit_description=?,active=? WHERE product_id=?', (*fields, int(data.get('active', True)), product_id))
             else:
-                product_id = db().execute('INSERT INTO products(sku,barcode,description,category_id,unit,active) VALUES(?,?,?,?,?,?)', (*fields, int(data.get('active', True)))).lastrowid
+                product_id = db().execute('''INSERT INTO products
+                    (sku,barcode,description,short_description,category_id,unit,unit_description,unit_price_minor,active)
+                    VALUES(?,?,?,?,?,?,?,?,?)''', (*fields, unit_amount, int(data.get('active', True)))).lastrowid
             current = db().execute('SELECT amount_minor FROM product_prices WHERE product_id=? ORDER BY price_id DESC LIMIT 1', (product_id,)).fetchone()
             if before:
                 before['amount_minor']=current[0] if current else None
+                before['selling_price_minor']=current[0] if current else None
             reason=None
             if not current:
                 reason='Initial selling price'
@@ -508,8 +546,9 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             if draft is not None:
                 db().execute('DELETE FROM product_import_drafts WHERE product_import_draft_id=?', (draft_id,))
             event('product.updated' if before else 'product.created', 'products', product_id, before=before,
-                  after={**dict(zip(('sku','barcode','description','category_id','unit'), fields)),
-                         'active': data.get('active', True), 'amount_minor': amount,
+                  after={**dict(zip(('sku','barcode','description','short_description','category_id','unit','unit_description'), fields)),
+                         'active': data.get('active', True), 'unit_price_minor': old['unit_price_minor'] if before else unit_amount,
+                         'selling_price_minor': amount, 'amount_minor': amount,
                          'import_draft_id': draft_id, 'opening_quantity': opening_quantity},
                   reason=reason, approved=g.user['user_id'])
             if opening_quantity:
@@ -603,7 +642,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         reauth(data)
         with transaction(db()):
             day = active_day()
-            require(not db().execute("SELECT 1 FROM shifts WHERE status='open'").fetchone(), 'Close all cashier shifts first.', 409)
+            open_shift = db().execute('''SELECT s.shift_id,s.cashier_user_id,u.display_name
+                FROM shifts s JOIN users u ON u.user_id=s.cashier_user_id
+                WHERE s.status='open' ORDER BY s.shift_id LIMIT 1''').fetchone()
+            if open_shift:
+                who = 'Your' if open_shift['cashier_user_id'] == g.user['user_id'] else open_shift['display_name'] + "'s"
+                raise Problem(f'{who} shift #{open_shift["shift_id"]} is still open. Close it in Cashier shifts first.', 409)
             require(not db().execute("SELECT 1 FROM purchase_tickets WHERE state='open'").fetchone(), 'Complete or cancel all open tickets first.', 409)
             db().execute("UPDATE bazaar_days SET status='closed',closed_at=?,closed_by_user_id=? WHERE bazaar_day_id=?", (now(), g.user['user_id'], day['bazaar_day_id']))
             event('day.closed', 'bazaar_days', day['bazaar_day_id'], day=day['bazaar_day_id'], approved=g.user['user_id'])
@@ -620,16 +664,38 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @app.get('/api/shifts')
     @signed_in()
     def shifts_get():
-        clause, params = ('', ()) if g.user['role'] == 'manager' else (' WHERE s.cashier_user_id=?', (g.user['user_id'],))
-        rows = db().execute('SELECT s.*,u.display_name,t.name terminal_name,d.day_number FROM shifts s JOIN users u ON u.user_id=s.cashier_user_id JOIN terminals t USING(terminal_id) JOIN bazaar_days d USING(bazaar_day_id)' + clause + ' ORDER BY s.shift_id DESC LIMIT 200', params).fetchall()
+        status = request.args.get('status')
+        require(status in (None, 'open', 'closed'), 'Choose open or closed shifts.', 400)
+        filters, params = [], []
+        if g.user['role'] not in ('manager', 'it_admin'):
+            filters.append('s.cashier_user_id=?')
+            params.append(g.user['user_id'])
+        if status:
+            filters.append('s.status=?')
+            params.append(status)
+        clause = ' WHERE ' + ' AND '.join(filters) if filters else ''
+        total = db().execute('SELECT COUNT(*) FROM shifts s' + clause, params).fetchone()[0]
+        page, page_size = 1, 200
+        if status == 'closed':
+            page_arg, size_arg = request.args.get('page', '1'), request.args.get('page_size', '10')
+            require(page_arg.isdecimal() and size_arg.isdecimal(), 'Choose a valid shift history page.', 400)
+            page, page_size = int(page_arg), int(size_arg)
+            require(1 <= page <= 100000 and 1 <= page_size <= 50, 'Choose a valid shift history page.', 400)
+        query = 'SELECT s.*,u.display_name,t.name terminal_name,d.day_number FROM shifts s JOIN users u ON u.user_id=s.cashier_user_id JOIN terminals t USING(terminal_id) JOIN bazaar_days d USING(bazaar_day_id)' + clause + ' ORDER BY s.shift_id DESC'
+        if status == 'closed':
+            rows = db().execute(query + ' LIMIT ? OFFSET ?', (*params, page_size, (page - 1) * page_size)).fetchall()
+        elif status == 'open':
+            rows = db().execute(query, params).fetchall()
+        else:
+            rows = db().execute(query + ' LIMIT 200', params).fetchall()
         result=[]
         for row in rows:
             ticket=db().execute("SELECT purchase_ticket_id,ticket_number,version FROM purchase_tickets WHERE owner_user_id=? AND state='open'",(row['cashier_user_id'],)).fetchone() if row['status']=='open' else None
             order=None
             if ticket:
                 order={**dict(ticket),'lines':[dict(l) for l in db().execute('SELECT p.description,l.quantity FROM ticket_lines l JOIN products p USING(product_id) WHERE purchase_ticket_id=?',(ticket['purchase_ticket_id'],))]}
-            result.append({**dict(row),'live_expected_minor':cash_expected(row['shift_id']),'open_ticket':order})
-        return jsonify(shifts=result)
+            result.append({**dict(row),'live_expected_minor':cash_expected(row['shift_id']) if row['status']=='open' else row['expected_cash_minor'],'open_ticket':order})
+        return jsonify(shifts=result, total=total, page=page, page_size=page_size)
 
     @app.post('/api/shifts/open')
     @signed_in()
@@ -638,6 +704,19 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         opening = integer(data, 'opening_cash_minor')
         with transaction(db()):
             day = active_day()
+            terminal_shift = db().execute('''SELECT s.shift_id,s.cashier_user_id,u.display_name
+                FROM shifts s JOIN users u ON u.user_id=s.cashier_user_id
+                WHERE s.terminal_id=? AND s.status='open' ''', (g.terminal['terminal_id'],)).fetchone()
+            if terminal_shift:
+                if terminal_shift['cashier_user_id'] == g.user['user_id']:
+                    raise Problem(f'Your shift #{terminal_shift["shift_id"]} is already open here. Refresh the page to continue.', 409)
+                action = ('Select Cancel, open Cashier shifts, count the drawer, and choose Manager close.' if g.user['role'] in ('manager', 'it_admin')
+                          else 'Select Cancel and ask a manager to count and close it in Cashier shifts.')
+                raise Problem(f'Another cashier’s shift is still open on this POS: {terminal_shift["display_name"]}, shift #{terminal_shift["shift_id"]}.\n{action} Then open your shift. Signing out alone does not close a shift.', 409)
+            user_shift = db().execute("SELECT shift_id FROM shifts WHERE cashier_user_id=? AND status='open'",
+                                      (g.user['user_id'],)).fetchone()
+            if user_shift:
+                raise Problem(f'Your shift #{user_shift["shift_id"]} is still open on another POS. Finish any unpaid orders, count and close that shift there, then try again.', 409)
             sid = db().execute("INSERT INTO shifts(bazaar_day_id,cashier_user_id,terminal_id,opening_cash_minor,opened_at,status) VALUES(?,?,?,?,?,'open')",
                 (day['bazaar_day_id'], g.user['user_id'], g.terminal['terminal_id'], opening, now())).lastrowid
             event('shift.opened', 'shifts', sid, day=day['bazaar_day_id'], after={'opening_cash_minor': opening})
@@ -710,18 +789,16 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         key = request_key(data)
         kind, lines = data.get('document_type'), data.get('lines')
         reference = text_field(data, 'reference_no', 80, True)
-        require(kind in ('opening','in','out','count','adjustment'), 'Invalid stock document type.')
+        require(kind in ('opening','in'), 'Only opening stock and stock receipts can be posted.')
         reason = text_field(data, 'reason', 300, optional=True)
         if not reason:
-            require(kind in ('opening','in'), 'Add a reason for stock-out, counts, or adjustments.')
             reason = 'Opening stock' if kind == 'opening' else 'Stock received'
         require(isinstance(lines, list) and 1 <= len(lines) <= 200, 'Enter 1–200 stock lines.')
         normalized = []
         for line in lines:
             require(isinstance(line, dict), 'Invalid stock line.')
             pid = integer(line, 'product_id', 1)
-            quantity = integer(line, 'quantity', -1_000_000 if kind == 'adjustment' else 0, 1_000_000)
-            require(kind == 'count' or quantity != 0, 'Enter a nonzero quantity.')
+            quantity = integer(line, 'quantity', 1, 1_000_000)
             normalized.append({'product_id': pid, 'quantity': quantity})
         require(len({l['product_id'] for l in normalized}) == len(normalized), 'Combine duplicate stock items.')
         request_hash = digest(json.dumps([kind, normalized, reason, reference], sort_keys=True))
@@ -733,7 +810,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 return jsonify(stock_document_id=old['stock_document_id'])
             bazaar = active_bazaar()
             day = db().execute("SELECT * FROM bazaar_days WHERE status='open'").fetchone()
-            require(kind == 'opening' or day, 'Open a bazaar day before posting stock movements.', 409)
+            require(kind == 'opening' or day, 'Open a business day before posting stock movements.', 409)
             did = day['bazaar_day_id'] if day else None
             sid = db().execute("INSERT INTO stock_documents(bazaar_id,bazaar_day_id,document_type,reference_no,reason,request_key,status,created_by_user_id,approved_by_user_id,created_at,approved_at) VALUES(?,?,?,?,?,?,'posted',?,?,?,?)",
                 (bazaar['bazaar_id'], did, kind, reference, reason, key, g.user['user_id'], g.user['user_id'], now(), now())).lastrowid
@@ -742,10 +819,9 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 require(balance, 'Stock item not found.', 404)
                 if kind == 'opening':
                     require(not db().execute('SELECT 1 FROM stock_movements WHERE product_id=? LIMIT 1', (line['product_id'],)).fetchone(), 'Opening stock is only allowed before an item has any movements.', 409)
-                change = line['quantity']-balance['quantity_on_hand'] if kind == 'count' else (-line['quantity'] if kind == 'out' else line['quantity'])
-                require(balance['quantity_on_hand']+change >= 0, 'Stock cannot become negative.', 409)
+                change = line['quantity']
                 lid = db().execute('INSERT INTO stock_document_lines(stock_document_id,product_id,quantity_change,expected_quantity,counted_quantity) VALUES(?,?,?,?,?)',
-                    (sid, line['product_id'], change, balance['quantity_on_hand'] if kind == 'count' else None, line['quantity'] if kind == 'count' else None)).lastrowid
+                    (sid, line['product_id'], change, None, None)).lastrowid
                 if change:
                     db().execute('INSERT INTO stock_movements(bazaar_id,bazaar_day_id,product_id,quantity_change,stock_document_line_id,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?)',
                         (bazaar['bazaar_id'], did, line['product_id'], change, lid, g.user['user_id'], now()))
@@ -762,6 +838,119 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             LEFT JOIN stock_documents sd USING(stock_document_id) ORDER BY m.stock_movement_id DESC LIMIT 500''').fetchall()
         return jsonify(movements=[dict(r) for r in rows])
 
+    @app.get('/api/inventory')
+    @signed_in(True)
+    def inventory_report():
+        bazaar = active_bazaar()
+        dates = {}
+        for name in ('from', 'to'):
+            value = request.args.get(name, '')
+            if value:
+                try:
+                    parsed = date.fromisoformat(value)
+                except ValueError:
+                    raise Problem('Use YYYY-MM-DD for inventory dates.')
+                require(parsed.isoformat() == value, 'Use YYYY-MM-DD for inventory dates.')
+                dates[name] = parsed
+        require(not (dates.get('from') and dates.get('to') and dates['from'] > dates['to']),
+                'The start date must be on or before the end date.')
+
+        def page_number(name):
+            value = request.args.get(name, '1')
+            require(value.isascii() and value.isdecimal() and len(value) <= 6 and 1 <= int(value) <= 100000,
+                    'Choose a valid inventory page.')
+            return int(value)
+
+        product_page = page_number('product_page')
+        movement_page = page_number('movement_page')
+        category_arg = request.args.get('category_id', '')
+        require(not category_arg or (category_arg.isdecimal() and int(category_arg) > 0),
+                'Choose a valid category.')
+        category_id = int(category_arg) if category_arg else None
+        search = request.args.get('q', '').strip()
+        require(len(search) <= 120, 'Search for a product using 120 characters or fewer.')
+
+        tz = ZoneInfo(bazaar['timezone'])
+        def utc_start(day):
+            return datetime(day.year, day.month, day.day, tzinfo=tz).astimezone(timezone.utc).isoformat(timespec='microseconds')
+        start = utc_start(dates['from']) if dates.get('from') else ''
+        end = utc_start(dates['to'] + timedelta(days=1)) if dates.get('to') and dates['to'] < date.max else '9999-12-31T23:59:59+00:00'
+
+        filters, params = [], []
+        if category_id:
+            filters.append('p.category_id=?')
+            params.append(category_id)
+        if search:
+            filters.append('(p.sku LIKE ? OR p.description LIKE ? OR COALESCE(p.barcode,\'\') LIKE ?)')
+            params.extend([f'%{search}%'] * 3)
+        where = ' WHERE ' + ' AND '.join(filters) if filters else ''
+        product_rows = db().execute('''SELECT p.product_id,p.sku,p.description,p.unit,p.active,
+                p.category_id,c.name category_name,b.quantity_on_hand,COALESCE(pr.amount_minor,0) amount_minor,
+                COALESCE(SUM(CASE WHEN m.created_at<? THEN m.quantity_change ELSE 0 END),0) opening,
+                COALESCE(SUM(CASE WHEN m.created_at>=? AND m.created_at<? AND m.stock_document_line_id IS NOT NULL THEN m.quantity_change ELSE 0 END),0) added,
+                COALESCE(SUM(CASE WHEN m.created_at>=? AND m.created_at<? AND m.sale_line_id IS NOT NULL THEN -m.quantity_change ELSE 0 END),0) sold,
+                COALESCE(SUM(CASE WHEN m.created_at>=? AND m.created_at<? AND m.correction_line_id IS NOT NULL THEN m.quantity_change ELSE 0 END),0) restocked
+            FROM products p JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
+            LEFT JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
+            LEFT JOIN stock_movements m ON m.product_id=p.product_id'''+where+'''
+            GROUP BY p.product_id ORDER BY p.description COLLATE NOCASE,p.product_id''',
+            (start, start, end, start, end, start, end, *params)).fetchall()
+        products = []
+        categories = {}
+        totals = {'products': 0, 'opening': 0, 'added': 0, 'sold': 0, 'restocked': 0,
+                  'closing': 0, 'current': 0, 'zero_products': 0, 'low_products': 0,
+                  'retail_value_minor': 0}
+        for row in product_rows:
+            item = dict(row)
+            item['closing'] = item['opening'] + item['added'] - item['sold'] + item['restocked']
+            item['retail_value_minor'] = item['closing'] * item['amount_minor']
+            item['zero_products'] = int(bool(item['active']) and item['closing'] == 0)
+            item['low_products'] = int(bool(item['active']) and 0 < item['closing'] < 6)
+            products.append(item)
+            category = categories.setdefault(item['category_id'], {'category_id': item['category_id'],
+                'category_name': item['category_name'], **{key: 0 for key in totals}})
+            for summary in (totals, category):
+                summary['products'] += 1
+                for key in ('opening', 'added', 'sold', 'restocked', 'closing', 'zero_products',
+                            'low_products', 'retail_value_minor'):
+                    summary[key] += item[key]
+                summary['current'] += item['quantity_on_hand']
+
+        movement_filters = ['m.created_at>=?', 'm.created_at<?', *filters]
+        movement_params = [start, end, *params]
+        movement_where = ' WHERE ' + ' AND '.join(movement_filters)
+        movement_from = ''' FROM stock_movements m JOIN products p USING(product_id)
+            JOIN categories c USING(category_id) JOIN users u ON u.user_id=m.created_by_user_id
+            LEFT JOIN bazaar_days d USING(bazaar_day_id)
+            LEFT JOIN stock_document_lines dl USING(stock_document_line_id)
+            LEFT JOIN stock_documents sd USING(stock_document_id)
+            LEFT JOIN sale_lines sl USING(sale_line_id)
+            LEFT JOIN sales s ON s.sale_id=sl.sale_id
+            LEFT JOIN correction_lines cl USING(correction_line_id)
+            LEFT JOIN sale_corrections sc ON sc.sale_correction_id=cl.sale_correction_id
+            LEFT JOIN sales rs ON rs.sale_id=sc.original_sale_id'''
+        movement_total = db().execute('SELECT COUNT(*)' + movement_from + movement_where,
+                                      movement_params).fetchone()[0]
+        movement_size, product_size = 15, 20
+        movement_page = min(movement_page, max(1, (movement_total + movement_size - 1) // movement_size))
+        product_page = min(product_page, max(1, (len(products) + product_size - 1) // product_size))
+        movements = db().execute('''SELECT m.stock_movement_id,m.created_at,m.quantity_change,
+                p.product_id,p.sku,p.description,c.name category_name,u.display_name,d.day_number,
+                CASE WHEN m.sale_line_id IS NOT NULL THEN 'sale'
+                     WHEN m.correction_line_id IS NOT NULL THEN 'restock'
+                     WHEN sd.document_type='opening' THEN 'opening' ELSE 'received' END movement_type,
+                COALESCE(s.receipt_number,rs.receipt_number,sd.reference_no,'') reference_no,
+                COALESCE(sd.reason,sc.reason,CASE WHEN m.sale_line_id IS NOT NULL THEN 'Completed sale' ELSE '' END) reason
+            '''+movement_from+movement_where+''' ORDER BY m.stock_movement_id DESC LIMIT ? OFFSET ?''',
+            (*movement_params, movement_size, (movement_page - 1) * movement_size)).fetchall()
+        return jsonify(summary=totals,
+            categories=sorted(categories.values(), key=lambda item: item['category_name'].casefold()),
+            products=products[(product_page - 1) * product_size:product_page * product_size],
+            product_total=len(products), product_page=product_page, product_page_size=product_size,
+            movements=[dict(row) for row in movements], movement_total=movement_total,
+            movement_page=movement_page, movement_page_size=movement_size,
+            timezone=bazaar['timezone'])
+
     def get_ticket(tid, enforce_owner=True):
         ticket = db().execute('SELECT * FROM purchase_tickets WHERE purchase_ticket_id=?', (tid,)).fetchone()
         require(ticket, 'Ticket not found.', 404)
@@ -769,26 +958,73 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             require(ticket['owner_user_id'] == g.user['user_id'] and ticket['terminal_id'] == g.terminal['terminal_id'], 'This ticket belongs to another cashier or laptop.', 403)
         return ticket
 
+    @app.get('/api/discount')
+    @signed_in()
+    def discount_get():
+        return jsonify(rates=[dict(row) for row in db().execute(
+            'SELECT discount_rate_id,percent_bp,created_at FROM discount_rates ORDER BY percent_bp')])
+
+    @app.post('/api/discount')
+    @signed_in(True)
+    def discount_add():
+        data = payload()
+        reauth(data)
+        percent = integer(data, 'discount_percent_bp', 1, 9900)
+        with transaction(db()):
+            require(not db().execute('SELECT 1 FROM discount_rates WHERE percent_bp=?', (percent,)).fetchone(),
+                    'This discount rate already exists.', 409)
+            rate_id = db().execute('INSERT INTO discount_rates(percent_bp,created_by_user_id,created_at) VALUES(?,?,?)',
+                                   (percent,g.user['user_id'],now())).lastrowid
+            event('discount.rate_added', 'discount_rates', rate_id,
+                  after={'discount_percent_bp': percent}, approved=g.user['user_id'])
+        return jsonify(discount_rate_id=rate_id,discount_percent_bp=percent)
+
+    @app.delete('/api/discount/<int:rate_id>')
+    @signed_in(True)
+    def discount_delete(rate_id):
+        data = payload()
+        reauth(data)
+        with transaction(db()):
+            rate = db().execute('SELECT percent_bp FROM discount_rates WHERE discount_rate_id=?', (rate_id,)).fetchone()
+            require(rate, 'Discount rate not found.', 404)
+            percent = rate['percent_bp']
+            affected = db().execute("UPDATE purchase_tickets SET discount_percent_bp=0,discount_selected=0,version=version+1,updated_at=? WHERE state='open' AND discount_percent_bp=?",
+                                    (now(),percent)).rowcount
+            db().execute('DELETE FROM discount_rates WHERE discount_rate_id=?', (rate_id,))
+            event('discount.rate_deleted', 'discount_rates', rate_id,
+                  before={'discount_percent_bp': percent}, after={'open_tickets_cleared': affected},
+                  approved=g.user['user_id'])
+        return jsonify(deleted=True,open_tickets_cleared=affected)
+
     def quote(tid):
         t = get_ticket(tid)
-        lines = db().execute('''SELECT l.product_id,l.quantity,p.sku,p.description,p.unit,p.active,p.category_id,c.name category_name,
+        lines = db().execute('''SELECT l.product_id,l.quantity,p.sku,p.description,p.short_description,p.unit,p.active,p.category_id,c.name category_name,
             b.quantity_on_hand,pr.price_id,pr.amount_minor,i.product_image_id FROM ticket_lines l JOIN products p USING(product_id)
             JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
             JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
             LEFT JOIN product_images i ON i.product_id=p.product_id AND i.superseded_at IS NULL WHERE l.purchase_ticket_id=? ORDER BY l.product_id''', (tid,)).fetchall()
-        snapshots = [{k:r[k] for k in ('product_id','quantity','sku','description','unit','active','category_id','category_name','price_id','amount_minor','product_image_id')} for r in lines]
+        rates = [dict(row) for row in db().execute('SELECT discount_rate_id,percent_bp FROM discount_rates ORDER BY percent_bp')]
+        percent = t['discount_percent_bp'] if t['state'] != 'open' or any(r['percent_bp'] == t['discount_percent_bp'] for r in rates) else 0
+        discounts = allocate_discount(lines, percent)
+        snapshots = [{**{k:r[k] for k in ('product_id','quantity','sku','description','short_description','unit','active','category_id','category_name','price_id','amount_minor','product_image_id','quantity_on_hand')},
+                      'discount_minor': discount, 'line_total_minor': r['quantity'] * r['amount_minor'] - discount}
+                     for r, discount in zip(lines, discounts)]
         duplicate=None
         if lines and t['state']=='open':
             cutoff=(datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat(timespec='microseconds')
-            signature=[(r['product_id'],r['quantity'],r['amount_minor']) for r in lines]
+            signature=[(r['product_id'],r['quantity'],r['amount_minor'],r['discount_minor']) for r in snapshots]
             for candidate in db().execute('SELECT sale_id,receipt_number FROM sales WHERE bazaar_day_id=? AND completed_at>=? ORDER BY sale_id DESC',(t['bazaar_day_id'],cutoff)):
-                previous=[tuple(r) for r in db().execute('SELECT product_id,quantity,unit_price_minor FROM sale_lines WHERE sale_id=? ORDER BY product_id',(candidate['sale_id'],))]
+                previous=[tuple(r) for r in db().execute('SELECT product_id,quantity,unit_price_minor,discount_minor FROM sale_lines WHERE sale_id=? ORDER BY product_id',(candidate['sale_id'],))]
                 if previous==signature:
                     duplicate=dict(candidate);break
-        qhash = digest(json.dumps([tid, t['version'], snapshots, duplicate['sale_id'] if duplicate else None], sort_keys=True))
+        qhash = digest(json.dumps([tid, t['version'], snapshots, percent, duplicate['sale_id'] if duplicate else None], sort_keys=True))
         sale = db().execute('SELECT sale_id FROM sales WHERE purchase_ticket_id=?', (tid,)).fetchone()
-        return {**dict(t), 'lines': [dict(r) for r in lines], 'total_minor': sum(r['quantity']*r['amount_minor'] for r in lines),
-                'quote_hash': qhash, 'sale_id': sale['sale_id'] if sale else None, 'duplicate_warning':duplicate}
+        subtotal = sum(r['quantity'] * r['amount_minor'] for r in lines)
+        discount = sum(discounts)
+        return {**dict(t), 'lines': snapshots, 'subtotal_minor': subtotal, 'discount_minor': discount,
+                'discount_percent_bp': percent, 'discount_rates': rates,
+                'total_minor': subtotal - discount, 'quote_hash': qhash,
+                'sale_id': sale['sale_id'] if sale else None, 'duplicate_warning': duplicate}
 
     @app.get('/api/tickets')
     @signed_in()
@@ -815,6 +1051,26 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @signed_in()
     def ticket_get(tid):
         return jsonify(quote(tid))
+
+    @app.put('/api/tickets/<int:tid>/discount')
+    @signed_in()
+    def ticket_discount(tid):
+        data = payload()
+        percent = integer(data, 'discount_percent_bp', 0, 9900)
+        version = integer(data, 'version')
+        with transaction(db()):
+            shift()
+            ticket = get_ticket(tid)
+            require(ticket['state'] == 'open' and ticket['version'] == version, 'The ticket changed. Reload it before choosing a discount.', 409)
+            require(not percent or db().execute('SELECT 1 FROM discount_rates WHERE percent_bp=?', (percent,)).fetchone(),
+                    'This discount rate is no longer available. Refresh the order.', 409)
+            if ticket['discount_percent_bp'] != percent:
+                db().execute('UPDATE purchase_tickets SET discount_percent_bp=?,discount_selected=?,version=version+1,updated_at=? WHERE purchase_ticket_id=?',
+                             (percent,int(percent > 0),now(),tid))
+                event('ticket.discount_selected', 'purchase_tickets', tid, day=ticket['bazaar_day_id'],
+                      before={'discount_percent_bp': ticket['discount_percent_bp']}, after={'discount_percent_bp': percent})
+            result = quote(tid)
+        return jsonify(result)
 
     @app.put('/api/tickets/<int:tid>')
     @signed_in()
@@ -896,19 +1152,19 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             stamp = now()
             # The ticket ID is globally unique, so the receipt cannot collide across days.
             number = f'SQI-{ticket["bazaar_day_id"]:03d}-{tid:06d}'
-            sid = db().execute('''INSERT INTO sales(purchase_ticket_id,receipt_number,bazaar_day_id,shift_id,cashier_user_id,terminal_id,subtotal_minor,total_minor,completed_at)
-                VALUES(?,?,?,?,?,?,?,?,?)''', (tid,number,s['bazaar_day_id'],s['shift_id'],g.user['user_id'],g.terminal['terminal_id'],q['total_minor'],q['total_minor'],stamp)).lastrowid
+            sid = db().execute('''INSERT INTO sales(purchase_ticket_id,receipt_number,bazaar_day_id,shift_id,cashier_user_id,terminal_id,subtotal_minor,discount_minor,discount_percent_bp,total_minor,completed_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)''', (tid,number,s['bazaar_day_id'],s['shift_id'],g.user['user_id'],g.terminal['terminal_id'],q['subtotal_minor'],q['discount_minor'],q['discount_percent_bp'],q['total_minor'],stamp)).lastrowid
             for l in q['lines']:
-                lid = db().execute('''INSERT INTO sale_lines(sale_id,product_id,price_id,product_image_id,sku_snapshot,description_snapshot,category_id_snapshot,category_name_snapshot,
-                    unit_snapshot,quantity,unit_price_minor,line_total_minor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
-                    (sid,l['product_id'],l['price_id'],l['product_image_id'],l['sku'],l['description'],l['category_id'],l['category_name'],l['unit'],l['quantity'],l['amount_minor'],l['quantity']*l['amount_minor'])).lastrowid
+                lid = db().execute('''INSERT INTO sale_lines(sale_id,product_id,price_id,product_image_id,sku_snapshot,description_snapshot,short_description_snapshot,category_id_snapshot,category_name_snapshot,
+                    unit_snapshot,quantity,unit_price_minor,discount_minor,line_total_minor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                    (sid,l['product_id'],l['price_id'],l['product_image_id'],l['sku'],l['description'],l['short_description'],l['category_id'],l['category_name'],l['unit'],l['quantity'],l['amount_minor'],l['discount_minor'],l['line_total_minor'])).lastrowid
                 db().execute('INSERT INTO stock_movements(bazaar_id,bazaar_day_id,product_id,quantity_change,sale_line_id,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?)',
                     (bazaar['bazaar_id'],s['bazaar_day_id'],l['product_id'],-l['quantity'],lid,g.user['user_id'],stamp))
             db().execute("INSERT INTO payments(sale_id,direction,method,amount_minor,tendered_minor,change_minor,recorded_at) VALUES(?,'in','cash',?,?,?,?)", (sid,q['total_minor'],tendered,tendered-q['total_minor'],stamp))
             db().execute("UPDATE purchase_tickets SET state='completed',version=version+1,updated_at=? WHERE purchase_ticket_id=?", (stamp,tid))
             db().execute("INSERT INTO checkout_requests(request_key,purchase_ticket_id,request_hash,status,sale_id,created_at,finished_at) VALUES(?,?,?,'completed',?,?,?)", (key,tid,fingerprint,sid,stamp,stamp))
             db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,created_at) VALUES(?,'issued','screen',?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],stamp))
-            event('sale.completed', 'sales', sid, day=s['bazaar_day_id'], after={'total_minor':q['total_minor'],'receipt_number':number})
+            event('sale.completed', 'sales', sid, day=s['bazaar_day_id'], after={'subtotal_minor': q['subtotal_minor'], 'discount_minor': q['discount_minor'], 'total_minor':q['total_minor'],'receipt_number':number})
             printer = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=? AND enabled=1', (g.terminal['terminal_id'],)).fetchone()
             if printer:
                 print_job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,paper_size,requested_by_user_id,created_at)
@@ -920,7 +1176,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         sale = db().execute('''SELECT s.*,u.display_name,d.day_number,d.business_date,b.name bazaar_name,b.currency_code,b.timezone
             FROM sales s JOIN users u ON u.user_id=s.cashier_user_id JOIN bazaar_days d USING(bazaar_day_id) JOIN bazaars b USING(bazaar_id) WHERE s.sale_id=?''', (sid,)).fetchone()
         require(sale, 'Sale not found.', 404)
-        require(g.user['role'] == 'manager' or sale['cashier_user_id'] == g.user['user_id'], 'You can view only your own receipts.', 403)
+        require(g.user['role'] in ('manager', 'it_admin') or sale['cashier_user_id'] == g.user['user_id'], 'You can view only your own receipts.', 403)
         return sale
 
     from .printing import register_printing
@@ -975,12 +1231,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             remaining={}
             for l in db().execute('SELECT * FROM sale_lines WHERE sale_id=?',(sid,)):
                 returned=db().execute('SELECT COALESCE(SUM(quantity),0) FROM correction_lines WHERE sale_line_id=?',(l['sale_line_id'],)).fetchone()[0]
-                remaining[l['sale_line_id']]=(l,l['quantity']-returned)
+                remaining[l['sale_line_id']]=(l,l['quantity']-returned,returned)
             refund_lines=[]
             for lid,qty,restock in normalized:
                 require(lid in remaining and qty<=remaining[lid][1] and restock<=qty, 'Return quantity exceeds the remaining sold quantity.',409)
                 l=remaining[lid][0]
-                refund_lines.append((lid,qty,restock,qty*l['unit_price_minor'],l['product_id']))
+                refund_lines.append((lid,qty,restock,refund_for_quantity(l,remaining[lid][2],qty),l['product_id']))
             if kind=='void':
                 require(not db().execute('SELECT 1 FROM sale_corrections WHERE original_sale_id=?',(sid,)).fetchone(), 'A partially returned sale cannot be voided.',409)
                 require({lid:qty for lid,qty,restock in normalized}=={lid:r[1] for lid,r in remaining.items()}, 'A void must reverse the whole sale.',409)
@@ -1009,7 +1265,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         reauth(data)
         name=text_field(data,'display_name',80)
         role=data.get('role')
-        require(role in ('cashier','manager'),'Invalid account role.')
+        require(role in ('cashier','manager','it_admin'),'Invalid account role.')
         require(type(data.get('active',True)) is bool,'Invalid account status.')
         password=data.get('password','')
         require(isinstance(password,str) and (not password or 12<=len(password)<=1024),'Use a password of at least 12 characters.')
@@ -1017,7 +1273,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             if uid:
                 old=db().execute('SELECT * FROM users WHERE user_id=?',(uid,)).fetchone()
                 require(old,'Account not found.',404)
-                require(uid!=g.user['user_id'] or (role=='manager' and data.get('active',True)), 'You cannot remove your own manager access.')
+                if old['username'].lower() == 'ginflorita':
+                    require(uid == g.user['user_id'], 'Only ginflorita can update the IT System Administrator account.', 403)
+                    require(role == 'it_admin' and data.get('active',True), 'The IT System Administrator role and active status are locked.', 403)
+                else:
+                    require(role != 'it_admin', 'Only ginflorita can have the IT System Administrator role.', 403)
+                require(uid!=g.user['user_id'] or (role in ('manager','it_admin') and data.get('active',True)), 'You cannot remove your own manager access.')
                 if not data.get('active',True):
                     require(not db().execute("SELECT 1 FROM shifts WHERE cashier_user_id=? AND status='open'",(uid,)).fetchone(),'Close this user’s shift before deactivation.',409)
                 db().execute('UPDATE users SET display_name=?,role=?,active=?,disabled_at=? WHERE user_id=?',(name,role,int(data.get('active',True)),None if data.get('active',True) else now(),uid))
@@ -1027,6 +1288,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             else:
                 username=text_field(data,'username',50).lower()
                 require(bool(re.fullmatch(r'[a-z0-9_.-]{3,50}',username)) and password,'Enter a valid username and a password of at least 12 characters.')
+                require(username != 'ginflorita' and role != 'it_admin', 'The IT System Administrator account cannot be created here.', 403)
                 uid=db().execute('INSERT INTO users(username,display_name,password_hash,role,active,created_by_user_id,created_at) VALUES(?,?,?,?,?,?,?)',(username,name,generate_password_hash(password,method='scrypt'),role,int(data.get('active',True)),g.user['user_id'],now())).lastrowid
             event('account.saved','users',uid,after={'display_name':name,'role':role,'active':data.get('active',True),'password_changed':bool(password)},approved=g.user['user_id'])
         return jsonify(user_id=uid)
@@ -1058,7 +1320,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             require(value.isdigit(),'Invalid terminal filter.')
             column='sh.terminal_id' if correction else f'{sale_alias}.terminal_id'
             clauses.append(column+'=?'); params.append(int(value))
-        if g.user['role']!='manager':
+        if g.user['role'] not in ('manager', 'it_admin'):
             clauses.append((f'{sale_alias}.created_by_user_id' if correction else f'{sale_alias}.cashier_user_id')+'=?'); params.append(g.user['user_id'])
         return (' WHERE '+' AND '.join(clauses) if clauses else ''),params
 
@@ -1147,8 +1409,10 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @app.get('/api/audit')
     @signed_in(True)
     def audit_get():
-        rows=db().execute('''SELECT a.*,u.display_name,t.name terminal_name FROM audit_events a
+        rows=db().execute('''SELECT a.*,u.display_name,t.name terminal_name,subject.display_name subject_display_name FROM audit_events a
             LEFT JOIN users u ON u.user_id=a.actor_user_id LEFT JOIN terminals t USING(terminal_id)
+            LEFT JOIN shifts s ON a.entity_type='shifts' AND s.shift_id=CAST(a.entity_key AS INTEGER)
+            LEFT JOIN users subject ON subject.user_id=s.cashier_user_id
             ORDER BY audit_event_id DESC LIMIT 500''').fetchall()
         return jsonify(events=[dict(r) for r in rows])
 

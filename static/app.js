@@ -21,6 +21,7 @@ const icon = name => `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><
 const money = n => new Intl.NumberFormat('en', {style:'currency', currency:S.bazaar?.currency_code || 'PHP'}).format((n||0)/100);
 const receiptNumber = value => String(value ?? '').replace(/^BZ-(\d{3,}-\d{6,})$/, 'SQI-$1');
 const num = n => new Intl.NumberFormat('en').format(n||0);
+const percentLabel = bp => `${(bp/100).toFixed(2).replace(/\.00$/,'').replace(/(\.\d)0$/,'$1')}%`;
 const timestamp = s => s ? new Date(s).toLocaleString('en', {timeZone:S.bazaar?.timezone || 'Asia/Manila', month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
 const minor = value => {
   const s=String(value).trim();
@@ -28,8 +29,12 @@ const minor = value => {
   const [a,b='']=s.split('.'); return Number(a)*100+Number(b.padEnd(2,'0'));
 };
 const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toString(16).padStart(2,'0')).join('');
-const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:'checkout',products:[],productDrafts:[],categories:[],ticket:null,cart:[],search:'',category:'all',filters:{},online:true,paying:false,cartError:false,receiptPrinter:null};
-let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, pendingProductImport=null;
+const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:location.hash.slice(1)||'reports',products:[],productDrafts:[],categories:[],ticket:null,cart:[],search:'',category:'all',productPage:0,filters:{},online:true,paying:false,cartError:false,receiptPrinter:null};
+const managerAccess=()=>['manager','it_admin'].includes(S.user?.role);
+const roleLabel=user=>({it_admin:'IT System Administrator',manager:'Manager',cashier:'Cashier'})[user?.role]||'Unknown';
+let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, catalogPollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, shiftConfirmationCancel=null, pendingProductImport=null, managementOpen=false, backupPage=0, shiftHistoryPage=1;
+const inventoryFilters={q:'',category_id:'',from:'',to:'',view:'products',product_page:1,movement_page:1};
+let inventoryRenderId=0;
 async function api(path, method='GET', data, isForm=false){
   let response;
   try { response=await fetch('/api'+path,{method,credentials:'same-origin',headers:{...(method!=='GET'?{'X-CSRF-Token':S.csrf}:{}),...(!isForm&&data?{'Content-Type':'application/json'}:{})},body:data?(isForm?data:JSON.stringify(data)):undefined}); }
@@ -51,35 +56,76 @@ function empty(title,description,action='',label=''){return `<div class="empty">
 function table(headers,rows){return `<div class="table-scroll"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;}
 function pill(text,style='success'){return `<span class="pill ${style}"><span class="dot"></span>${e(text)}</span>`;}
 function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>${e(title)}</h1><p>${e(description)}</p></div><div class="actions">${actions}</div></div>`;}
-function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
-function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}const wasQuantity=$('#modal-title')?.textContent==='Choose quantity';$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;if(wasQuantity&&S.page==='checkout')$('#barcode-input')?.focus({preventScroll:true});}
+function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();if(shiftConfirmationCancel)shiftConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
+function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}if(shiftConfirmationCancel){shiftConfirmationCancel();return;}const wasQuantity=['Choose quantity','Set quantity'].includes($('#modal-title')?.textContent);$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;if(wasQuantity&&S.page==='checkout'){const search=$('#product-search');search?.focus({preventScroll:true});search?.select();}}
 function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<form id="modal-form" class="form-grid">${body}<div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green">${submit}${icon('arrow')}</button></div></form>`,wide);$('#modal-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const submitButton=$('[type=submit]',form);if(submitButton.disabled)return;submitButton.disabled=true;$('.form-error',form).textContent='';try{await onSubmit(Object.fromEntries(new FormData(form)),form);}catch(error){$('.form-error',form).textContent=error.message;}finally{submitButton.disabled=false;}});}
 async function refreshState(){const data=await api('/state');Object.assign(S,data);return data;}
 async function loadCatalog(){const data=await api('/catalog');S.products=data.products;S.productDrafts=data.drafts||[];S.categories=data.categories;}
+async function refreshCheckoutStock(){
+  if(catalogPollBusy||!S.user||S.page!=='checkout'||document.hidden||S.paying||cartPending)return;
+  catalogPollBusy=true;
+  try{
+    const userId=S.user.user_id;
+    const data=await api('/catalog?background=1');
+    if(S.user?.user_id!==userId||S.page!=='checkout'||!$('#product-grid')||cartPending)return;
+    const changed=JSON.stringify([S.products,S.categories])!==JSON.stringify([data.products,data.categories]);
+    S.products=data.products;S.productDrafts=data.drafts||[];S.categories=data.categories;
+    if(!changed)return;
+    const productScroll=$('#product-grid').scrollTop;
+    renderCategorySelect();renderProducts();renderCart();
+    $('#product-grid').scrollTop=productScroll;
+  }catch{}finally{catalogPollBusy=false;}
+}
 function renderAuth(setup){
   if(paymentConfirmationCancel)paymentConfirmationCancel();
   void exitCheckoutFullscreen();
   $('#modal-root').innerHTML='';
-  $('#app').innerHTML=`<div class="auth"><aside class="auth-story"><div class="brand auth-brand"><img src="/static/sqi-logo.png" alt="SQI company logo"><span>SQI Group Int'l Corp<small>Philippines</small></span></div><div class="auth-title"><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>Your counter.<br><em>Ready for business.</em></h1><p>Products, stock, sales, and receipts in one place for your team.</p></div><div class="auth-foot"><span class="dot"></span>Made for your local network. Ready without internet.</div><div class="auth-circle"></div></aside><main class="auth-form"><div class="eyebrow">${setup?'LET’S SET UP YOUR COUNTER':'WELCOME BACK'}</div><h2>${setup?'Set up your SQI counter.':'Your counter is waiting.'}</h2><p>${setup?'Create the manager account on this host laptop. You can add your second cashier after setup.':'Sign in with your own account to open your shift.'}</p><form id="auth-form" class="form-grid">${setup?field('Your name','display_name','text','','required autocomplete="name"')+field('Company / bazaar name','bazaar_name','text',"SQI Group Int'l Corp - Philippines",'required maxlength="120"'):''}${field('Username','username','text','','required autocomplete="username" minlength="3" maxlength="50"')}${field('Password','password','password','','required autocomplete="'+(setup?'new-password':'current-password')+'" '+(setup?'minlength="12"':''))}${setup?selectField('Currency','currency_code',[['PHP','PHP · Philippine peso'],['USD','USD · US dollar'],['TWD','TWD · Taiwan dollar'],['SGD','SGD · Singapore dollar'],['EUR','EUR · Euro'],['GBP','GBP · British pound'],['MYR','MYR · Malaysian ringgit'],['THB','THB · Thai baht'],['HKD','HKD · Hong Kong dollar'],['AUD','AUD · Australian dollar']],'PHP')+field('Business timezone','timezone','text','Asia/Manila','required'):''}<div class="form-error" role="alert"></div><div class="field full"><button class="btn green" type="submit">${setup?'Create my counter':'Sign in'}${icon('arrow')}</button></div></form><div class="auth-note">${setup?'Use at least 12 characters for your password. Currency and timezone apply to this counter.':'Each sale stays connected to the person who made it.'}</div></main></div>`;
+  $('#app').innerHTML=`<div class="auth"><aside class="auth-story"><div class="brand auth-brand"><img src="/static/sqi-logo.png" alt="SQI company logo"><span>SQI Group Int'l Corp<small>Philippines</small></span></div><div class="auth-title"><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>Your counter.<br><em>Ready for business.</em></h1><p>Products, stock, sales, and receipts in one place for your team.</p></div><div class="auth-foot"><span class="dot"></span>Made for your local network. Ready without internet.</div><div class="auth-circle"></div></aside><main class="auth-form"><div class="eyebrow">${setup?'LET’S SET UP YOUR COUNTER':'WELCOME BACK'}</div><h2>${setup?'Set up your SQI counter.':'Your counter is waiting.'}</h2><p>${setup?'Create the manager account on this host laptop. You can add your second cashier after setup.':'Sign in with your own account to open your shift.'}</p><form id="auth-form" class="form-grid">${setup?field('Your name','display_name','text','','required autocomplete="name"')+field('Business name','bazaar_name','text',"SQI Group Int'l Corp - Philippines",'required maxlength="120"'):''}${field('Username','username','text','','required autocomplete="username" minlength="3" maxlength="50"')}${field('Password','password','password','','required autocomplete="'+(setup?'new-password':'current-password')+'" '+(setup?'minlength="12"':''))}${setup?selectField('Currency','currency_code',[['PHP','PHP · Philippine peso'],['USD','USD · US dollar'],['TWD','TWD · Taiwan dollar'],['SGD','SGD · Singapore dollar'],['EUR','EUR · Euro'],['GBP','GBP · British pound'],['MYR','MYR · Malaysian ringgit'],['THB','THB · Thai baht'],['HKD','HKD · Hong Kong dollar'],['AUD','AUD · Australian dollar']],'PHP')+field('Business timezone','timezone','text','Asia/Manila','required'):''}<div class="form-error" role="alert"></div><div class="field full"><button class="btn green" type="submit">${setup?'Create my counter':'Sign in'}${icon('arrow')}</button></div></form><div class="auth-note">${setup?'Use at least 12 characters for your password. Currency and timezone apply to this counter.':'Each sale stays connected to the person who made it.'}</div></main></div>`;
   $('#auth-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const b=$('[type=submit]',form);b.disabled=true;$('.form-error',form).textContent='';try{await api(setup?'/setup':'/login','POST',Object.fromEntries(new FormData(form)));await boot();}catch(error){$('.form-error',form).textContent=error.message;}finally{b.disabled=false;}});
 }
-const nav=[['checkout','cart','Checkout'],['catalog','grid','Products'],['inventory','box','Inventory'],['transactions','receipt','Transactions'],['reports','chart','Reports'],['shifts','clock','Cashier shifts'],['team','users','Team'],['audit','shield','Audit trail'],['settings','settings','Settings']];
+const nav=[['checkout','cart','Checkout'],['catalog','grid','Products'],['inventory','box','Inventory'],['transactions','receipt','Transactions'],['reports','chart','Reports'],['shifts','clock','Cashier shifts'],['team','users','Team'],['audit','shield','Audit trail'],['management','settings','Business day'],['discounts','chart','Discounts'],['backups','download','Backups'],['printer','print','Printer']];
+const managementPages=new Set(['management','discounts','backups','printer']);
 function shell(){
-  const allowed=nav.filter(([id])=>S.user.role==='manager'||['checkout','transactions','shifts'].includes(id));
+  const allowed=nav.filter(([id])=>!managementPages.has(id)&&(managerAccess()||['checkout','transactions','shifts'].includes(id)));
   const initials=S.user.display_name.split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
-  $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand company-brand"><img src="/static/sqi-logo.png" alt="SQI company logo" width="5442" height="3064"><span class="company-brand-name">SQI Group Int'l Corp<small>Philippines</small></span></div><div class="nav-label">WORKSPACE</div><nav class="nav">${allowed.map(([id,i,label],index)=>`${index===5?'<div class="nav-gap"></div>':''}<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}</nav><div class="side-foot"><div class="local-status" id="connection-state"><span class="dot"></span>Local server connected</div><div class="side-user"><div class="avatar">${e(initials)}</div><div><strong>${e(S.user.display_name)}</strong><small>${e(S.user.role)}</small></div><button class="icon-btn" title="Sign out" aria-label="Sign out" data-action="logout">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">SQI Group <span>/</span><b id="page-name">Checkout</b></div><div class="top-right"><span class="date-label">${new Intl.DateTimeFormat('en',{timeZone:S.bazaar.timezone,month:'short',day:'numeric',year:'numeric'}).format(new Date())}</span>${pill(S.day?'Day '+S.day.day_number+' is open':'Day closed',S.day?'success':'warn')}<div class="avatar">${e(initials)}</div></div></header><div id="connection-banner" class="connection-banner" hidden></div><div id="page" class="page"></div></main></div>`;
+  managementOpen=managementPages.has(S.page);
+  const managementNav=managerAccess()?`<div class="nav-management"><button id="management-toggle" type="button" class="${managementOpen?'group-active':''}" data-action="toggle-management" aria-expanded="${managementOpen}" aria-controls="management-subnav" title="Management">${icon('settings')}<span>Management</span>${icon('down')}</button><div class="nav-submenu" id="management-subnav" ${managementOpen?'':'hidden'}>${nav.filter(([id])=>managementPages.has(id)).map(([id,i,label])=>`<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}</div></div>`:'';
+  $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand company-brand"><img src="/static/sqi-logo.png" alt="SQI company logo" width="5442" height="3064"><span class="company-brand-name">SQI Group Int'l Corp<small>Philippines</small></span></div><div class="nav-label">WORKSPACE</div><nav class="nav">${allowed.map(([id,i,label],index)=>`${index===5?'<div class="nav-gap"></div>':''}<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}${managementNav}</nav><div class="side-foot"><div class="local-status" id="connection-state"><span class="dot"></span>Local server connected</div><div class="side-user"><div class="avatar">${e(initials)}</div><div><strong>${e(S.user.display_name)}</strong><small>${e(roleLabel(S.user))}</small></div><button class="icon-btn" title="Sign out" aria-label="Sign out" data-action="logout">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">SQI Group <span>/</span><b id="page-name">Checkout</b></div><div class="top-right"><span class="date-label">${new Intl.DateTimeFormat('en',{timeZone:S.bazaar.timezone,month:'short',day:'numeric',year:'numeric'}).format(new Date())}</span>${pill(S.day?'Day '+S.day.day_number+' is open':'Day closed',S.day?'success':'warn')}<div class="avatar">${e(initials)}</div></div></header><div id="connection-banner" class="connection-banner" hidden></div><div id="page" class="page"></div></main></div>`;
 }
-async function boot(){try{await cartQueue;await refreshState();if(!S.user)return renderAuth(S.setup_required);await loadCatalog();shell();await navigate(S.page);}catch(error){toast(error.message,true);if(!S.user)renderAuth(false);}}
+function renderBootError(error){
+  const detail=error.status===503
+    ? 'The database is busy. If DB Browser for SQLite is open, resolve its pending changes and close the database, then retry.'
+    : 'Check that the local server is running, then retry.';
+  $('#app').innerHTML=`<main class="boot-error" role="alert"><h1>Unable to open your counter</h1><p>${e(error.message)}</p><p>${detail}</p><button type="button" class="btn green" id="retry-boot">Try again</button></main>`;
+  $('#retry-boot').addEventListener('click',boot,{once:true});
+}
+async function boot(){try{await cartQueue;await refreshState();if(!S.user)return renderAuth(S.setup_required);if(!nav.some(([id])=>id===S.page))S.page='reports';if(!managerAccess()&&!['checkout','transactions','shifts'].includes(S.page))S.page='checkout';await loadCatalog();shell();await navigate(S.page);}catch(error){renderBootError(error);}}
 async function navigate(page){
+  if(page==='settings')page='management';
+  if(page==='checkout'&&(!S.day||!S.shift)){
+    await navigate(managerAccess()?'reports':'transactions');
+    return checkoutStartPrompt();
+  }
   if(page!=='checkout')await exitCheckoutFullscreen();
-  S.page=page;$$('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));$('#page-name').textContent=nav.find(n=>n[0]===page)?.[2]||page;
-  const renderers={checkout:renderCheckout,catalog:renderCatalog,inventory:renderInventory,transactions:renderTransactions,reports:renderReports,shifts:renderShifts,team:renderTeam,audit:renderAudit,settings:renderSettings};
+  if(page==='backups'&&S.page!=='backups')backupPage=0;
+  S.page=page;if(location.hash.slice(1)!==page)history.replaceState(null,'',`${location.pathname}${location.search}#${page}`);$$('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));$('#page-name').textContent=nav.find(n=>n[0]===page)?.[2]||page;
+  if(managementPages.has(page))managementOpen=true;
+  const submenu=$('#management-subnav'),toggle=$('#management-toggle');
+  if(submenu)submenu.hidden=!managementOpen;
+  if(toggle){toggle.setAttribute('aria-expanded',String(managementOpen));toggle.classList.toggle('group-active',managementPages.has(page));}
+  const renderers={checkout:renderCheckout,catalog:renderCatalog,inventory:renderInventory,transactions:renderTransactions,reports:renderReports,shifts:renderShifts,team:renderTeam,audit:renderAudit,management:renderManagement,discounts:renderDiscounts,backups:renderBackups,printer:renderPrinter};
   try{await renderers[page]();}catch(error){toast(error.message,true);$('#page').innerHTML=empty('Unable to open this page',error.message);}
+}
+function toggleManagement(){
+  managementOpen=!managementOpen;
+  const submenu=$('#management-subnav'),toggle=$('#management-toggle');
+  if(submenu)submenu.hidden=!managementOpen;
+  if(toggle)toggle.setAttribute('aria-expanded',String(managementOpen));
 }
 function syncCheckoutFullscreen(){
   document.body.classList.toggle('checkout-fullscreen',checkoutFullscreen);
   const control=$('[data-action=toggle-checkout-fullscreen]');
-  if(control){control.innerHTML=icon(checkoutFullscreen?'collapse':'expand')+(checkoutFullscreen?'Exit fullscreen':'Fullscreen');control.setAttribute('aria-pressed',String(checkoutFullscreen));control.title=checkoutFullscreen?'Exit fullscreen (Esc)':'Open checkout fullscreen';}
+  if(control){control.innerHTML=icon(checkoutFullscreen?'collapse':'expand')+(checkoutFullscreen?'Exit fullscreen':'Fullscreen');control.setAttribute('aria-pressed',String(checkoutFullscreen));control.title=checkoutFullscreen?`Exit fullscreen and open ${managerAccess()?'Reports':'Transactions'} (Esc)`:'Open checkout fullscreen';}
 }
 async function enterCheckoutFullscreen(){
   checkoutFullscreen=true;syncCheckoutFullscreen();
@@ -92,22 +138,43 @@ async function exitCheckoutFullscreen(){
   checkoutFullscreen=false;syncCheckoutFullscreen();
   if(browserFullscreenOwned){browserFullscreenOwned=false;if(document.fullscreenElement)try{await document.exitFullscreen();}catch{}}
 }
+async function leaveCheckoutFullscreen(){
+  if(!checkoutFullscreen&&!browserFullscreenOwned)return;
+  await exitCheckoutFullscreen();
+  if(S.page==='checkout'&&S.user)await navigate(managerAccess()?'reports':'transactions');
+}
 function checkoutModePrompt(){
   if($('.modal')||S.paying)return;
-  modal('Open checkout',`<p>Choose how to open your counter. Fullscreen hides the sidebar and workspace header so products and the current order have more room.</p><div class="modal-actions checkout-mode-actions">${button('Cancel','close-modal','light')}${button('Standard view','checkout-standard','light')}${button('Open fullscreen','checkout-fullscreen','green','expand')}</div>`);
+  modal('Open checkout',`<p>Checkout will open in fullscreen. Press <strong>Esc</strong> to exit and return to ${managerAccess()?'Reports':'Transactions'}.</p><p>Click OK to proceed.</p><div class="modal-actions">${button('Cancel','close-modal','light')}${button('OK','checkout-fullscreen','green','expand')}</div>`);
 }
-async function openCheckoutMode(fullscreen){
+function checkoutStartPrompt(){
+  if($('.modal')||S.paying)return;
+  if(!S.day){
+    if(managerAccess())return openDay(true);
+    modal('Checkout is closed',`<p>The business day has not been started. Ask the system manager to start the day before you open your shift or make a sale.</p><div class="modal-actions">${button('OK','close-modal','green')}</div>`);
+    return;
+  }
+  if(!S.shift)return openShift(true);
+  checkoutModePrompt();
+}
+async function requestCheckout(){
+  if($('.modal')||S.paying)return;
+  await refreshState();
+  if(!S.user)return renderAuth(false);
+  if((!S.day||!S.shift)&&S.page==='checkout')return navigate('checkout');
+  checkoutStartPrompt();
+}
+async function openCheckoutFullscreen(){
+  await refreshState();
+  if(!S.user)return renderAuth(false);
   closeModal();
-  if(fullscreen)await enterCheckoutFullscreen();else await exitCheckoutFullscreen();
+  if(!S.day||!S.shift)return navigate('checkout');
+  await enterCheckoutFullscreen();
   await cartQueue;await navigate('checkout');
 }
-document.addEventListener('fullscreenchange',()=>{if(browserFullscreenOwned&&!document.fullscreenElement){browserFullscreenOwned=false;checkoutFullscreen=false;syncCheckoutFullscreen();}});
-function gate(){
-  if(!S.day)return `<div class="notice">${icon('sun')}<div><strong>A fresh day starts here.</strong><br>A manager needs to open the bazaar day before checkout.</div>${S.user.role==='manager'?`<div class="actions">${button('Open a day','open-day','green','plus')}</div>`:''}</div>`;
-  if(!S.shift)return `<div class="notice">${icon('clock')}<div><strong>Ready for your first sale?</strong><br>Open your shift and record the cash in your drawer.</div><div class="actions">${button('Open my shift','open-shift','green','plus')}</div></div>`;
-  return '';
-}
+document.addEventListener('fullscreenchange',()=>{if(browserFullscreenOwned&&!document.fullscreenElement)void leaveCheckoutFullscreen();});
 async function renderCheckout(){
+  if(!S.day||!S.shift)return navigate('checkout');
   const [,printing]=await Promise.all([loadCatalog(),api('/receipt-printer')]);
   S.receiptPrinter=printing.printer;
   let recoveredSale=null,pendingOpen=false;
@@ -123,33 +190,43 @@ async function renderCheckout(){
   if(tickets.tickets.length){S.ticket=await api('/tickets/'+tickets.tickets[0].purchase_ticket_id);S.cart=S.ticket.lines.map(l=>({product_id:l.product_id,quantity:l.quantity}));}
   else{S.ticket=null;S.cart=[];}
   S.cartError=false;
-  $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions">${printerConnectButton(S.receiptPrinter)}${button('Refresh stock','refresh-catalog','light','refresh')}${button(checkoutFullscreen?'Exit fullscreen':'Fullscreen','toggle-checkout-fullscreen','light',checkoutFullscreen?'collapse':'expand',`aria-pressed="${checkoutFullscreen}"`)}</div></div>`+gate()+`<div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Search products, SKU or scan barcode…" aria-label="Search products" value="${e(S.search)}" autocomplete="off"><kbd>/</kbd></div></div><div class="category-tabs" id="category-tabs"></div><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-grid" id="product-grid"></div><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
+  $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions">${printerConnectButton(S.receiptPrinter)}${S.shift?button('Close my shift','close-shift','light','clock'):''}${managerAccess()?button(S.day?'Finish day':'Start day','day-steps','light','sun'):''}${button(checkoutFullscreen?'Exit fullscreen':'Fullscreen','toggle-checkout-fullscreen','light',checkoutFullscreen?'collapse':'expand',`aria-pressed="${checkoutFullscreen}"`)}</div></div><div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Search by name, SKU, or barcode" aria-label="Search by product name, SKU, or barcode" value="${e(S.search)}" autocomplete="off" autocapitalize="off" spellcheck="false"><kbd>/</kbd></div><select id="checkout-category" class="checkout-category-select" aria-label="Filter products by category"></select></div><p class="search-hint">Scan a barcode or SKU to add one item. Scan again to add another, or use Qty in the order to set a larger total. Choose a category to browse.</p><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-list" id="product-grid"></div><nav class="product-pager" id="product-pager" aria-label="Browse product pages"></nav><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
   const searchInput=$('#product-search');
-  searchInput.placeholder='Search by name, SKU, or barcode';
-  searchInput.setAttribute('aria-label','Search by product name, SKU, or barcode');
-  $('.search-row').insertAdjacentHTML('beforeend',`<form id="barcode-form" class="barcode-form"><input id="barcode-input" type="text" placeholder="Scan or type barcode" aria-label="Scan or type barcode or SKU" autocomplete="off" autocapitalize="off" spellcheck="false"><button type="submit" class="btn green">Find item</button></form>`);
-  $('.search-row').insertAdjacentHTML('afterend','<p class="barcode-hint">Scanner: scan into the barcode box and press Enter. Confirm the quantity before adding the item.</p>');
-  $('#barcode-form').addEventListener('submit',ev=>{
-    ev.preventDefault();
-    const input=$('#barcode-input'),code=input.value.trim();
-    if(!code){input.focus();return;}
-    if(quantityDialogOpening||$('.modal')||S.paying){toast('Finish the current item before scanning another.',true);return;}
-    const product=S.products.find(p=>p.active&&(p.barcode===code||p.sku.toLowerCase()===code.toLowerCase()));
-    if(!product){toast('No active product matches that barcode or SKU. Check Products or search by name.',true);input.select();return;}
-    input.value='';
-    productQuantityModal(product.product_id).catch(error=>{toast(error.message,true);input.focus();});
+  let scanTimer;
+  const exactMatches=query=>S.products.filter(p=>p.active&&(p.barcode===query||p.sku.toLowerCase()===query.toLowerCase()));
+  async function addScannedProduct(query,showUnmatched){
+    if(!searchInput.isConnected||S.page!=='checkout'||searchInput.value.trim()!==query||quantityDialogOpening||$('.modal'))return;
+    if(S.paying){if(showUnmatched)toast('Finish the current payment before scanning another.',true);return;}
+    const matches=exactMatches(query);
+    if(matches.length!==1){if(showUnmatched){toast(matches.length?'More than one item matches. Choose one from the list.':'No active product matches that barcode or SKU. Try searching by name.',true);searchInput.select();}return;}
+    const product=matches[0];
+    searchInput.value='';S.search='';S.productPage=0;renderProducts();searchInput.focus({preventScroll:true});
+    try{
+      await addProduct(product.product_id,1);
+      if(!S.cartError)toast('Added 1 × '+product.description+'. Scan again for another or use Qty to set the total.');
+    }catch(error){toast(error.message,true);searchInput.focus({preventScroll:true});}
+  }
+  searchInput.addEventListener('input',ev=>{
+    clearTimeout(scanTimer);
+    S.search=ev.target.value;S.productPage=0;renderProducts();
+    const query=searchInput.value.trim();
+    if(query&&exactMatches(query).length===1){
+      scanTimer=setTimeout(()=>{if(searchInput.value.trim()===query)void addScannedProduct(query,false);},250);
+    }
   });
-  searchInput.addEventListener('input',ev=>{S.search=ev.target.value;renderProducts();});
-  $('#product-search').addEventListener('keydown',ev=>{if(ev.key==='Enter'){ev.preventDefault();const matches=S.products.filter(p=>p.active&&(p.sku.toLowerCase()===S.search.toLowerCase()||p.barcode===S.search));if(matches.length===1)productQuantityModal(matches[0].product_id).catch(err=>toast(err.message,true));}});
-  renderCategories();renderProducts();renderCart();
+  searchInput.addEventListener('keydown',async ev=>{
+    if(ev.key!=='Enter')return;
+    ev.preventDefault();clearTimeout(scanTimer);
+    const query=searchInput.value.trim();
+    if(query)await addScannedProduct(query,true);
+  });
+  renderCategorySelect();renderProducts();renderCart();
   if(recoveredSale){await showReceipt(recoveredSale);toast('Recovered the saved payment. This is the original receipt.');}
   else if(pendingOpen)await paymentModal();
-  else $('#barcode-input')?.focus({preventScroll:true});
+  else{searchInput.focus({preventScroll:true});searchInput.select();}
 }
-function printerConnectButton(printer,compact=false){
-  if(printer?.online)return button(compact?'Connected':'Printer connected','start-print-helper','light','check','disabled aria-label="Receipt printer connected"');
-  return button('Connect printer','start-print-helper','green','print');
-}
+function canStartPrintHelper(){return ['localhost','127.0.0.1','::1','[::1]'].includes(location.hostname);}
+function printerConnectButton(printer){return printer?.enabled&&!printer.online&&canStartPrintHelper()?button('Connect printer','start-print-helper','green','print'):'';}
 async function startPrintHelper(){
   const buttons=$$('[data-action=start-print-helper]');
   buttons.forEach(b=>{b.disabled=true;b.innerHTML=icon('refresh')+'Starting printer…';});
@@ -160,10 +237,9 @@ async function startPrintHelper(){
       const data=await api('/receipt-printer');
       S.receiptPrinter=data.printer;
       if(data.printer?.online){
-        $$('[data-action=start-print-helper]').forEach(b=>{b.disabled=true;b.className='btn light';b.innerHTML=icon('check')+'Printer connected';});
-        const status=$('.payment-printer-status>span');
-        if(status)status.innerHTML=icon('check')+'Receipt printer connected';
-        toast('Receipt printer connected. It will print automatically after payment.');
+        buttons.forEach(b=>b.remove());
+        if(S.page==='printer')await renderPrinter();
+        toast(data.printer.enabled?'Receipt printer connected. It will print automatically after payment.':'Print helper connected. Choose a printer and turn on automatic printing in Settings.');
         return;
       }
     }
@@ -173,23 +249,44 @@ async function startPrintHelper(){
     throw error;
   }
 }
-function renderCategories(){ $('#category-tabs').innerHTML=[['all','All products',S.products.filter(p=>p.active).length],...S.categories.filter(c=>c.active).map(c=>[c.category_id,c.name,S.products.filter(p=>p.active&&p.category_id===c.category_id).length])].map(([id,label,count])=>`<button data-category="${id}" class="${String(S.category)===String(id)?'active':''}">${e(label)}<span>${count}</span></button>`).join(''); }
-const tileColors=['#fff2e7','#fff7f0','#ffe9d8','#fff4ea','#ffede0','#fff9f4'];
+function renderCategorySelect(){
+  const select=$('#checkout-category');if(!select)return;
+  const categories=S.categories.filter(c=>c.active);
+  if(S.category!=='all'&&!categories.some(c=>String(c.category_id)===String(S.category))){S.category='all';S.productPage=0;}
+  select.innerHTML=`<option value="all">All categories (${num(S.products.filter(p=>p.active).length)})</option>`+categories.map(c=>`<option value="${c.category_id}">${e(c.name)} (${num(S.products.filter(p=>p.active&&p.category_id===c.category_id).length)})</option>`).join('');
+  select.value=String(S.category);
+}
 function productVisual(p){return p.product_image_id?`<img src="/api/images/${p.product_image_id}" alt="${e(p.description)}" loading="lazy">`:icon(['bag','cup','leaf','box'][p.category_id%4]);}
 function viewProductImage(pid){
   const product=S.products.find(p=>p.product_id===pid);
   if(!product?.product_image_id)return;
   modal('Product photo',`<figure class="product-photo-viewer"><img src="/api/images/${product.product_image_id}" alt="${e(product.description)}"><figcaption><strong>${e(product.sku)}</strong><span>${e(product.description)}</span></figcaption></figure><div class="modal-actions">${button('Close','close-modal','light')}</div>`,true);
 }
+const PRODUCT_PAGE_SIZE=24;
 function renderProducts(){
-  const search=S.search.toLowerCase();const products=S.products.filter(p=>p.active&&(S.category==='all'||String(p.category_id)===String(S.category))&&[p.sku,p.description,p.barcode||''].some(v=>v.toLowerCase().includes(search)));
-  $('#product-count').textContent=`${products.length} products`;
-  $('#product-grid').innerHTML=products.map(p=>`<div class="product-card ${p.quantity_on_hand===0?'sold-out':''}"><button type="button" class="product-visual ${p.product_image_id?'viewable-photo':''}" style="--tile:${tileColors[p.category_id%tileColors.length]}" ${p.product_image_id?`data-action="view-product-image" data-id="${p.product_id}" aria-label="View photo of ${e(p.description)}"`:`data-add="${p.product_id}" aria-label="Choose quantity for ${e(p.description)}" ${!p.quantity_on_hand?'disabled':''}`}>${productVisual(p)}<span class="stock-badge ${p.quantity_on_hand<6?'low':''}">${p.quantity_on_hand?p.quantity_on_hand+' in stock':'Out of stock'}</span>${p.product_image_id?'<span class="photo-view-hint">View photo</span>':''}</button><button type="button" class="product-detail" data-add="${p.product_id}" ${!p.quantity_on_hand?'disabled':''} aria-label="Choose quantity for ${e(p.description)}"><div class="eyebrow">${e(p.category_name)}</div><h3>${e(p.description)}</h3><div class="product-bottom"><strong>${money(p.amount_minor)} <small>/ ${e(p.unit)}</small></strong><span class="add-badge">+</span></div></button></div>`).join('')||`<div class="no-results">${empty(S.products.length?'No products found':'Your shelves are ready',S.products.length?'Try another name, SKU, or category.':'Add your products and opening stock to get started.',S.user.role==='manager'?'new-product':'', 'Add a product')}</div>`;
+  const search=S.search.trim().toLowerCase();
+  const products=S.products.filter(p=>p.active&&(S.category==='all'||String(p.category_id)===String(S.category))&&[p.sku,p.description,p.short_description||'',p.barcode||''].some(v=>v.toLowerCase().includes(search)));
+  const pageCount=Math.max(1,Math.ceil(products.length/PRODUCT_PAGE_SIZE));
+  S.productPage=Math.max(0,Math.min(S.productPage,pageCount-1));
+  const first=S.productPage*PRODUCT_PAGE_SIZE;
+  const pageProducts=products.slice(first,first+PRODUCT_PAGE_SIZE);
+  $('#product-count').textContent=products.length?`Showing ${first+1}–${Math.min(first+PRODUCT_PAGE_SIZE,products.length)} of ${num(products.length)} products`:'0 products';
+  const rows=pageProducts.map(p=>`<tr class="${p.quantity_on_hand?'':'checkout-product-unavailable'}"><td class="checkout-product-code">${e(p.sku)}</td><td class="checkout-product-code">${e(p.barcode||'—')}</td><td class="checkout-product-description">${e(p.description)}${p.product_image_id?` <button type="button" class="checkout-product-photo" data-action="view-product-image" data-id="${p.product_id}" aria-label="View photo of ${e(p.description)}">${icon('image')} Photo</button>`:''}</td><td class="checkout-product-stock ${p.quantity_on_hand<6?'low':''}">${p.quantity_on_hand?`${num(p.quantity_on_hand)} <small>${e(p.unit)}</small>`:'Out of stock'}</td><td class="checkout-product-price">${money(p.amount_minor)}</td><td class="checkout-product-add"><button type="button" data-add="${p.product_id}" aria-label="Choose quantity for ${e(p.description)}" ${p.quantity_on_hand?'':'disabled'}>${icon('plus')}</button></td></tr>`);
+  const emptyRow=`<tr><td colspan="6" class="checkout-list-empty">${empty(S.products.length?'No products found':'Your shelves are ready',S.products.length?'Try another name, SKU, or category.':'Add your products and opening stock to get started.',managerAccess()?'new-product':'', 'Add a product')}</td></tr>`;
+  $('#product-grid').innerHTML=`<table class="checkout-product-table" aria-label="Browse products"><colgroup><col class="checkout-col-sku"><col class="checkout-col-barcode"><col class="checkout-col-description"><col class="checkout-col-stock"><col class="checkout-col-price"><col class="checkout-col-add"></colgroup><thead><tr><th scope="col">SKU</th><th scope="col">Barcode</th><th scope="col">Description</th><th scope="col">Stock</th><th scope="col">Unit price</th><th scope="col">Add</th></tr></thead><tbody>${rows.length?rows.join(''):emptyRow}</tbody></table>`;
+  $('#product-pager').innerHTML=pageCount>1?`<button type="button" data-product-page="previous" ${S.productPage===0?'disabled':''}>Previous</button><span>Page ${S.productPage+1} of ${pageCount}</span><button type="button" data-product-page="next" ${S.productPage===pageCount-1?'disabled':''}>Next</button>`:'';
 }
 function cartTotal(){return S.cart.reduce((total,l)=>total+(S.products.find(p=>p.product_id===l.product_id)?.amount_minor||0)*l.quantity,0);}
+function cartPricing(){
+  const subtotal=cartTotal(),rate=S.ticket?.discount_percent_bp||0;
+  const refundableCapacity=S.cart.reduce((sum,l)=>{const p=S.products.find(p=>p.product_id===l.product_id);return sum+Math.max(0,((p?.amount_minor||0)-1)*l.quantity);},0);
+  const discount=Math.min(Math.floor((subtotal*rate+5000)/10000),refundableCapacity);
+  return {subtotal,discount,total:subtotal-discount};
+}
 function renderCart(){
   if(!$('#cart'))return;const units=S.cart.reduce((a,l)=>a+l.quantity,0);
-  $('#cart').innerHTML=`<div class="cart-header"><h2>Current order <span class="count-bubble">${units}</span></h2><button class="icon-btn" data-action="cancel-ticket" title="Cancel order" aria-label="Cancel order" ${!S.ticket?'disabled':''}>${icon('close')}</button></div><div class="cart-ticket"><span>${S.ticket?e(S.ticket.ticket_number):'A new order awaits'}</span><span>${e(S.user.display_name.split(' ')[0])}</span></div><div class="cart-lines">${S.cart.length?`<table class="cart-table" aria-label="Current order items"><colgroup><col class="cart-col-sku"><col class="cart-col-description"><col class="cart-col-quantity"><col class="cart-col-total"></colgroup><thead><tr><th scope="col">SKU</th><th scope="col">DESC</th><th scope="col" class="cart-quantity-cell">QTY</th><th scope="col" class="right">TOTAL</th></tr></thead><tbody>${S.cart.map(l=>{const p=S.products.find(p=>p.product_id===l.product_id);if(!p)return '';return `<tr><td class="cart-row-sku">${e(p.sku)}</td><td><button type="button" class="btn light small cart-view-description" data-action="view-cart-description" data-id="${p.product_id}" aria-label="View description for ${e(p.sku)}">View</button></td><td class="cart-quantity-cell"><div class="qty-control"><button type="button" data-qty="${p.product_id}" data-delta="-1" aria-label="Remove one ${e(p.description)}">−</button><span>${l.quantity}</span><button type="button" data-qty="${p.product_id}" data-delta="1" aria-label="Add one ${e(p.description)}">+</button></div></td><td class="right cart-row-total">${money(p.amount_minor*l.quantity)}</td></tr>`;}).join('')}</tbody></table>`:`<div class="cart-empty"><p>A little empty for now.<br>Choose a product to start an order.</p></div>`}</div><div class="cart-summary"><div class="sum-row"><span>Subtotal</span><span>${money(cartTotal())}</span></div><div class="sum-row"><span>Items</span><span>${units} ${units===1?'item':'items'}</span></div><div class="sum-row total"><span>Total amount</span><strong>${money(cartTotal())}</strong></div>${button('Review payment','pay','green','arrow',!S.cart.length||!S.shift||S.cartError?'disabled':'')}</div><div class="cart-foot">${S.cartError?'Cart needs a refresh before payment':S.ticket?'Saved to this ticket · Cash payment':'One ticket. One payment. One receipt.'}</div>`;
+  const pricing=cartPricing(),rate=S.ticket?.discount_percent_bp||0,rates=S.ticket?.discount_rates||[];
+  $('#cart').innerHTML=`<div class="cart-header"><h2>Current order <span class="count-bubble">${units}</span></h2><button class="icon-btn" data-action="cancel-ticket" title="Cancel order" aria-label="Cancel order" ${!S.ticket?'disabled':''}>${icon('close')}</button></div><div class="cart-ticket"><span>${S.ticket?e(S.ticket.ticket_number):'A new order awaits'}</span><span>${e(S.user.display_name.split(' ')[0])}</span></div><div class="cart-lines">${S.cart.length?`<table class="cart-table" aria-label="Current order items"><colgroup><col class="cart-col-sku"><col class="cart-col-description"><col class="cart-col-quantity"><col class="cart-col-total"></colgroup><thead><tr><th scope="col">SKU</th><th scope="col">DESC</th><th scope="col" class="cart-quantity-cell">QTY</th><th scope="col" class="right">TOTAL</th></tr></thead><tbody>${S.cart.map(l=>{const p=S.products.find(p=>p.product_id===l.product_id);if(!p)return '';return `<tr><td class="cart-row-sku">${e(p.sku)}</td><td><button type="button" class="btn light small cart-view-description" data-action="view-cart-description" data-id="${p.product_id}" aria-label="View description for ${e(p.sku)}">View</button></td><td class="cart-quantity-cell"><div class="qty-control"><button type="button" data-qty="${p.product_id}" data-delta="-1" aria-label="Remove one ${e(p.description)}">−</button><button type="button" class="cart-set-quantity" data-action="set-cart-quantity" data-id="${p.product_id}" aria-label="Set total quantity for ${e(p.description)}">Qty ${l.quantity}</button><button type="button" data-qty="${p.product_id}" data-delta="1" aria-label="Add one ${e(p.description)}">+</button></div></td><td class="right cart-row-total">${money(p.amount_minor*l.quantity)}</td></tr>`;}).join('')}</tbody></table>`:`<div class="cart-empty"><p>A little empty for now.<br>Choose a product to start an order.</p></div>`}</div><div class="cart-summary"><div class="sum-row"><span>Subtotal</span><span>${money(pricing.subtotal)}</span></div>${rates.length?`<div class="cart-discount-choice"><label for="discount-choice">Discount</label><select id="discount-choice" aria-label="Order discount" ${cartPending||S.cartError?'disabled':''}><option value="0">No discount</option>${rates.map(r=>`<option value="${r.percent_bp}" ${rate===r.percent_bp?'selected':''}>${percentLabel(r.percent_bp)}</option>`).join('')}</select></div>`:''}${pricing.discount?`<div class="sum-row"><span>Discount (${percentLabel(rate)})</span><span>−${money(pricing.discount)}</span></div>`:''}<div class="sum-row"><span>Items</span><span>${units} ${units===1?'item':'items'}</span></div><div class="sum-row total"><span>Total amount</span><strong>${money(pricing.total)}</strong></div>${button('Review payment','pay','green','arrow',!S.cart.length||!S.shift||S.cartError?'disabled':'')}</div><div class="cart-foot">${S.cartError?'Cart needs a refresh before payment':S.ticket?'Saved to this ticket · Cash payment':'One ticket. One payment. One receipt.'}</div>`;
   if(S.ticket){const transfer=document.createElement('button');transfer.type='button';transfer.className='icon-btn';transfer.dataset.action='transfer-ticket';transfer.setAttribute('aria-label','Transfer this order');transfer.title='Transfer this order';transfer.innerHTML=icon('users');$('.cart-ticket').appendChild(transfer);}
   if(cartPending){$('.cart-foot').textContent='Saving this ticket…';$('[data-action=pay]').disabled=true;}
 }
@@ -203,14 +300,15 @@ async function productQuantityModal(pid){
   quantityDialogOpening=true;
   try{
     await cartQueue;
-    requireClient(S.day&&S.shift,'Open the bazaar day and your shift before starting a sale.');
+    requireClient(S.day&&S.shift,'Open the business day and your shift before starting a sale.');
     requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
     if(S.ticket)requireClient(!localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`),'Review the previous payment result before changing this order.');
     const product=S.products.find(p=>p.product_id===pid),existing=S.cart.find(l=>l.product_id===pid)?.quantity||0;
     requireClient(product?.active,'This product is no longer available. Refresh the counter.');
     const available=product.quantity_on_hand-existing;
     requireClient(available>0,'All available stock for this item is already in the order.');
-    formModal('Choose quantity',`<div class="quantity-product field full"><div class="cart-thumb">${productVisual(product)}</div><div><h3>${e(product.description)}</h3><small>${e(product.sku)} · ${money(product.amount_minor)} / ${e(product.unit)}</small></div></div><div class="field full"><small>Available to add: ${available} ${e(product.unit)}.${existing?' Already in order: '+existing+' '+e(product.unit)+'.':''} Nothing is added until you confirm.</small></div>`+field('Quantity to add','quantity','number','1',`required min="1" max="${available}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>Amount to add</span><strong id="quantity-add-total">${money(product.amount_minor)}</strong></div>`,async data=>{
+    const details=`<div class="quantity-product field full"><div class="cart-thumb">${productVisual(product)}</div><div class="quantity-product-price"><small>Unit price</small><strong>${money(product.amount_minor)} / ${e(product.unit)}</strong></div></div><div class="quantity-product-identifiers field full"><div><span>SKU</span><strong>${e(product.sku)}</strong></div><div><span>Barcode</span><strong>${e(product.barcode||'Not assigned')}</strong></div></div><div class="quantity-product-description field full"><span>Description</span><p>${e(product.description)}</p></div>`;
+    formModal('Choose quantity',details+`<div class="field full"><small>Available to add: ${available} ${e(product.unit)}.${existing?' Already in order: '+existing+' '+e(product.unit)+'.':''} Nothing is added until you confirm.</small></div>`+field('Quantity to add','quantity','number','1',`required min="1" max="${available}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>Amount to add</span><strong id="quantity-add-total">${money(product.amount_minor)}</strong></div>`,async data=>{
       const quantity=Number(data.quantity);
       requireClient(Number.isSafeInteger(quantity)&&quantity>=1,'Enter a whole quantity of at least 1.');
       requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
@@ -233,11 +331,51 @@ async function productQuantityModal(pid){
     quantityInput.select();
   }finally{quantityDialogOpening=false;}
 }
+async function setCartQuantityModal(pid){
+  if(quantityDialogOpening||$('.modal')||S.paying)return;
+  quantityDialogOpening=true;
+  try{
+    await cartQueue;
+    requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
+    requireClient(S.ticket&&!localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`),'Review the previous payment result before changing this order.');
+    const product=S.products.find(p=>p.product_id===pid),existing=S.cart.find(l=>l.product_id===pid)?.quantity||0;
+    requireClient(product&&existing>0,'This item is no longer in the order. Refresh the counter.');
+    const max=Math.min(product.quantity_on_hand,1_000_000);
+    const details=`<div class="quantity-product field full"><div class="cart-thumb">${productVisual(product)}</div><div class="quantity-product-price"><small>Unit price</small><strong>${money(product.amount_minor)} / ${e(product.unit)}</strong></div></div><div class="quantity-product-identifiers field full"><div><span>SKU</span><strong>${e(product.sku)}</strong></div><div><span>Barcode</span><strong>${e(product.barcode||'Not assigned')}</strong></div></div><div class="quantity-product-description field full"><span>Description</span><p>${e(product.description)}</p></div>`;
+    formModal('Set quantity',details+`<div class="field full"><small>Set the total quantity for this item, not the amount to add. Current total: ${existing}. Available stock: ${max}. Enter 0 to remove it.</small></div>`+field('Total quantity in order','quantity','number',existing,`required min="0" max="${max}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>New line total</span><strong id="quantity-set-total">${money(product.amount_minor*existing)}</strong></div>`,async data=>{
+      const quantity=Number(data.quantity);
+      requireClient(Number.isSafeInteger(quantity)&&quantity>=0,'Enter a whole quantity of 0 or more.');
+      await cartQueue;
+      requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
+      await loadCatalog();
+      const current=S.products.find(p=>p.product_id===pid),inOrder=S.cart.find(l=>l.product_id===pid)?.quantity||0;
+      requireClient(current&&inOrder>0,'This item is no longer in the order. Refresh the counter.');
+      requireClient(quantity<=current.quantity_on_hand&&quantity<=1_000_000,'That quantity exceeds the stock currently available. Reopen Qty to review stock.');
+      requireClient(quantity===0||current.active,'This product is no longer available. Refresh the counter.');
+      requireClient(quantity===0||current.amount_minor===product.amount_minor,'The selling price changed. Reopen Qty to review its price.');
+      if(quantity!==inOrder)await addProduct(pid,quantity-inOrder);
+      requireClient(!S.cartError,'The order could not be saved. Refresh the counter before trying again.');
+      closeModal();renderProducts();toast(quantity?`Total quantity set to ${quantity}.`:'Item removed from the order.');
+    },'Set quantity');
+    const form=$('#modal-form'),quantityInput=$('[name=quantity]',form);
+    quantityInput.addEventListener('input',()=>{
+      const quantity=Number(quantityInput.value);
+      $('#quantity-set-total',form).textContent=quantityInput.value!==''&&Number.isSafeInteger(quantity)&&quantity>=0&&quantity<=max?money(quantity*product.amount_minor):'—';
+    });
+    quantityInput.select();
+  }finally{quantityDialogOpening=false;}
+}
 async function addProduct(pid,delta=1){
-  if(!S.day||!S.shift)throw new Error('Open the bazaar day and your shift before starting a sale.');
+  if(S.paying)throw new Error('Finish the current payment before changing this order.');
+  if(S.cartError)throw new Error('Refresh the counter to recover the saved cart.');
+  if(!S.day||!S.shift)throw new Error('Open the business day and your shift before starting a sale.');
+  const p=S.products.find(p=>p.product_id===pid);
+  if(!p||(delta>0&&!p.active))throw new Error('This product is no longer available. Refresh the counter.');
+  if(delta>0&&p.quantity_on_hand<=0)throw new Error('This product is out of stock.');
   if(!S.ticket){if(!creatingTicket)creatingTicket=api('/tickets','POST',{}).then(t=>{S.ticket=t;S.cart=t.lines.map(l=>({product_id:l.product_id,quantity:l.quantity}));}).finally(()=>creatingTicket=null);await creatingTicket;}
   if(localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`))throw new Error('Review the previous payment result before changing this order.');
-  const p=S.products.find(p=>p.product_id===pid);const existing=S.cart.find(l=>l.product_id===pid);const qty=(existing?.quantity||0)+delta;
+  const existing=S.cart.find(l=>l.product_id===pid);const qty=(existing?.quantity||0)+delta;
+  if(!Number.isSafeInteger(qty)||qty<0||qty>1_000_000)throw new Error('Enter a valid whole quantity.');
   if(qty>p.quantity_on_hand)throw new Error('That quantity exceeds the stock currently available.');
   if(qty<=0)S.cart=S.cart.filter(l=>l.product_id!==pid);else if(existing)existing.quantity=qty;else S.cart.push({product_id:pid,quantity:qty});
   const snapshot=S.cart.map(l=>({...l}));cartPending++;renderCart();
@@ -248,7 +386,7 @@ function askPaymentConfirmation(total,paid,ticketNumber,retry=false){
   return new Promise(resolve=>{
     const original=$('#modal-root .modal-overlay'),overlay=document.createElement('div');
     overlay.className='modal-overlay payment-confirm-overlay';
-    overlay.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="payment-confirm-title"><div class="modal-head payment-confirm-head"><h2 id="payment-confirm-title">Have you received the cash and checked the change?</h2><button type="button" class="icon-btn" aria-label="Close confirmation" data-payment-confirm="no">${icon('close')}</button></div><div class="modal-body"><p class="payment-confirm-ticket">${e(ticketNumber)}</p><dl class="payment-confirm-summary"><div><dt>Total amount</dt><dd>${money(total)}</dd></div><div><dt>Amount paid</dt><dd>${money(paid)}</dd></div><div><dt>Change due</dt><dd>${money(paid-total)}</dd></div></dl>${retry?'<p class="payment-confirm-note">Check or retry the previously submitted payment using the same request.</p>':''}<div class="payment-printer-status"><span>${icon(S.receiptPrinter?.online?'check':'print')}${S.receiptPrinter?.online?'Receipt printer connected':'Receipt printer is offline'}</span>${S.receiptPrinter?.online?'':printerConnectButton(S.receiptPrinter,true)}</div><div class="payment-confirm-footer"><strong>Confirm payment?</strong><div class="modal-actions"><button type="button" class="btn light" data-payment-confirm="no">No</button><button type="button" class="btn green" data-payment-confirm="yes" disabled>Yes${icon('check')}</button></div></div></div></section>`;
+    overlay.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="payment-confirm-title"><div class="modal-head payment-confirm-head"><h2 id="payment-confirm-title">Have you received the cash and checked the change?</h2><button type="button" class="icon-btn" aria-label="Close confirmation" data-payment-confirm="no">${icon('close')}</button></div><div class="modal-body"><p class="payment-confirm-ticket">${e(ticketNumber)}</p><dl class="payment-confirm-summary"><div><dt>Total amount</dt><dd>${money(total)}</dd></div><div><dt>Amount paid</dt><dd>${money(paid)}</dd></div><div><dt>Change due</dt><dd>${money(paid-total)}</dd></div></dl>${retry?'<p class="payment-confirm-note">Check or retry the previously submitted payment using the same request.</p>':''}<div class="payment-confirm-footer"><strong>Confirm payment?</strong><div class="modal-actions"><button type="button" class="btn light" data-payment-confirm="no">No</button><button type="button" class="btn green" data-payment-confirm="yes" disabled>Yes${icon('check')}</button></div></div></div></section>`;
     original.hidden=true;$('#modal-root').appendChild(overlay);
     let settled=false;
     const finish=confirmed=>{
@@ -270,7 +408,7 @@ async function paymentModal(){
   const pendingKey=`bazaar-pending-${S.user.user_id}-${q.purchase_ticket_id}`;
   let pending;try{pending=JSON.parse(localStorage.getItem(pendingKey)||'null');}catch{pending=null;}
   const total=q.total_minor;
-  modal('Complete this order',`<form id="payment-form" class="form-grid"><div class="payment-total field full"><small>${e(q.ticket_number)} · ${q.lines.reduce((a,l)=>a+l.quantity,0)} items</small><strong>${money(total)}</strong><small>Cash payment · No discount or tax applied</small></div><div class="field full"><label for="amount-paid">Amount paid</label><input id="amount-paid" name="amount" type="text" inputmode="decimal" placeholder="0.00" value="${pending?(pending.tendered_minor/100).toFixed(2):''}" required autocomplete="off" ${pending?'readonly':''}></div><div class="quick-cash">${[total,...[10000,20000,50000,100000].filter(n=>n>total).slice(0,3)].map(n=>`<button type="button" data-cash="${n}" ${pending?'disabled':''}>${n===total?'Exact':money(n)}</button>`).join('')}</div><div class="change-line"><span>Change due</span><strong id="change-due">${money(pending?pending.tendered_minor-total:0)}</strong></div><div class="form-error" role="alert"></div><div class="field full"><small>${pending?'This payment was submitted before. Retrying will retrieve the same sale if it was saved.':'Check the amount before confirming. A receipt follows the saved sale.'}</small></div><div class="modal-actions">${button('Back','close-modal','light')}<button type="submit" class="btn green">${pending?'Check / retry payment':'Confirm payment'}${icon('check')}</button></div></form>`);
+  modal('Complete this order',`<form id="payment-form" class="form-grid"><div class="payment-total field full"><small>${e(q.ticket_number)} · ${q.lines.reduce((a,l)=>a+l.quantity,0)} items</small><div class="sum-row"><span>Subtotal</span><span>${money(q.subtotal_minor)}</span></div>${q.discount_minor?`<div class="sum-row"><span>Discount (${percentLabel(q.discount_percent_bp)})</span><span>−${money(q.discount_minor)}</span></div>`:''}<strong>${money(total)}</strong><small>Cash payment · No added tax</small></div><div class="field full"><label for="amount-paid">Amount paid</label><input id="amount-paid" name="amount" type="text" inputmode="decimal" placeholder="0.00" value="${pending?(pending.tendered_minor/100).toFixed(2):''}" required autocomplete="off" ${pending?'readonly':''}></div><div class="quick-cash">${[total,...[10000,20000,50000,100000].filter(n=>n>total).slice(0,3)].map(n=>`<button type="button" data-cash="${n}" ${pending?'disabled':''}>${n===total?'Exact':money(n)}</button>`).join('')}</div><div class="change-line"><span>Change due</span><strong id="change-due">${money(pending?pending.tendered_minor-total:0)}</strong></div><div class="form-error" role="alert"></div><div class="field full"><small>${pending?'This payment was submitted before. Retrying will retrieve the same sale if it was saved.':'Check the amount before confirming. A receipt follows the saved sale.'}</small></div><div class="modal-actions">${button('Back','close-modal','light')}<button type="submit" class="btn green">${pending?'Check / retry payment':'Confirm payment'}${icon('check')}</button></div></form>`);
   if(q.duplicate_warning){const warning=document.createElement('div');warning.className='notice field full';warning.innerHTML=`<label class="check-field"><input id="duplicate-reviewed" type="checkbox" required ${pending?.duplicate_reviewed?'checked':''}><span>A matching order (${e(receiptNumber(q.duplicate_warning.receipt_number))}) was saved in the last two minutes. I checked that this is a separate customer purchase.</span></label>`;$('#payment-form').prepend(warning);}
   $('#amount-paid').addEventListener('input',()=>{try{$('#change-due').textContent=money(Math.max(0,minor($('#amount-paid').value)-total));}catch{$('#change-due').textContent='—';}});
   $('#payment-form').addEventListener('submit',async ev=>{
@@ -298,12 +436,28 @@ function receiptCompanyHeader(){return `<header class="receipt-company-header"><
 function receiptCompanyFooter(){return `<footer class="receipt-company"><p>Head office: 18 Pineapple Rd, Malabon, 1475 Metro Manila, Philippines</p><div class="receipt-company-grid"><span>Tel: 8-364-7561</span><span>Website: <a href="https://sqigroup.ph" target="_blank" rel="noopener noreferrer">https://sqigroup.ph</a></span><span>Office Hours: 9:00 AM – 6:00 PM</span><span>Monday – Saturday</span></div></footer>`;}
 async function showReceipt(sid){
   const r=await api('/sales/'+sid);currentReceipt=r;const s=r.sale,p=r.payment;
-  modal('Acknowledgement receipt',`<div class="receipt-content">${receiptCompanyHeader()}<div class="receipt-heading"><p class="receipt-title">ACKNOWLEDGEMENT RECEIPT</p><p>${e(receiptNumber(s.receipt_number))}</p></div><div class="receipt-meta">Date: ${e(s.business_date)}<br>Cashier: ${e(s.display_name)}</div><table><thead><tr><th>ITEM</th><th class="right">AMOUNT</th></tr></thead><tbody>${r.lines.map(l=>`<tr><td>${e(l.description_snapshot)}<br>${l.quantity} × ${money(l.unit_price_minor)}</td><td class="right">${money(l.line_total_minor)}</td></tr>`).join('')}</tbody></table><div class="sum-row total"><span>TOTAL</span><strong>${money(s.total_minor)}</strong></div><div class="sum-row"><span>Cash paid</span><span>${money(p.tendered_minor)}</span></div><div class="sum-row"><span>Change</span><span>${money(p.change_minor)}</span></div><div class="receipt-thanks">Thank you for your purchase.</div>${receiptCompanyFooter()}</div>${r.corrections.length?`<div class="receipt-extra notice">${r.corrections.length} correction(s) linked · ${money(r.corrections.reduce((a,c)=>a+c.refund_total_minor,0))} refunded</div>`:''}<div class="modal-actions">${S.user.role==='manager'?button('Return / void','return-sale','light','refresh',`data-id="${sid}"`):''}${button('Print / save PDF','print-receipt','green','print',`data-id="${sid}"`)}</div>`);currentReceipt=r;
+  modal('Acknowledgement receipt',`<div class="receipt-content">${receiptCompanyHeader()}<div class="receipt-heading"><p class="receipt-title">ACKNOWLEDGEMENT RECEIPT</p><p>${e(receiptNumber(s.receipt_number))}</p></div><div class="receipt-meta">Date: ${e(s.business_date)}<br>Cashier: ${e(s.display_name)}</div><table><thead><tr><th>ITEM</th><th class="right">AMOUNT</th></tr></thead><tbody>${r.lines.map(l=>`<tr><td>${e(l.short_description_snapshot||l.description_snapshot)}<br>${l.quantity} × ${money(l.unit_price_minor)}${l.discount_minor?`<br>Discount: −${money(l.discount_minor)}`:''}</td><td class="right">${money(l.line_total_minor)}</td></tr>`).join('')}</tbody></table>${s.discount_minor?`<div class="sum-row"><span>Subtotal</span><span>${money(s.subtotal_minor)}</span></div><div class="sum-row"><span>Discount (${percentLabel(s.discount_percent_bp)})</span><span>−${money(s.discount_minor)}</span></div>`:''}<div class="sum-row total"><span>TOTAL</span><strong>${money(s.total_minor)}</strong></div><div class="sum-row"><span>Cash paid</span><span>${money(p.tendered_minor)}</span></div><div class="sum-row"><span>Change</span><span>${money(p.change_minor)}</span></div><div class="receipt-thanks">Thank you for your purchase.</div>${receiptCompanyFooter()}</div>${r.corrections.length?`<div class="receipt-extra notice">${r.corrections.length} correction(s) linked · ${money(r.corrections.reduce((a,c)=>a+c.refund_total_minor,0))} refunded</div>`:''}<div class="modal-actions">${managerAccess()?button('Return / void','return-sale','light','refresh',`data-id="${sid}"`):''}${button('Print / save PDF','print-receipt','green','print',`data-id="${sid}"`)}</div>`);currentReceipt=r;
   await $('.receipt-logo').decode().catch(()=>{});
   void refreshReceiptPrintStatus(sid);
 }
-function openDay(){const today=new Intl.DateTimeFormat('en-CA',{timeZone:S.bazaar.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());formModal('Open the next bazaar day',field('Business date','business_date','date',today,'required')+approval(),async data=>{await api('/days/open','POST',data);closeModal();await boot();toast('The bazaar day is open.');},'Open day');}
-function openShift(){formModal('Open your cashier shift',`<div class="field full"><small>Count the starting cash in this shift’s drawer. Sales and refunds will be reconciled against it.</small></div>`+field('Opening cash','opening_cash','text','0.00','required inputmode="decimal"'),async data=>{await api('/shifts/open','POST',{opening_cash_minor:minor(data.opening_cash)});closeModal();await boot();toast('Your shift is open.');},'Open shift');}
+function openDay(continueToCheckout=false){const today=new Intl.DateTimeFormat('en-CA',{timeZone:S.bazaar.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());formModal('Open the next business day',field('Business date','business_date','date',today,'required')+approval(),async data=>{await api('/days/open','POST',data);closeModal();await boot();toast('The business day is open.');if(continueToCheckout)openShift(true);},'Open day');}
+async function shiftOpenErrorMessage(error){
+  if(error.status!==409||!error.message.startsWith('This operation conflicts with an existing record'))return error.message;
+  try{
+    const {shifts}=await api('/shifts?status=open');
+    const here=shifts.find(s=>s.terminal_id===S.terminal?.terminal_id);
+    if(here?.cashier_user_id===S.user?.user_id)return `Your shift #${here.shift_id} is already open here. Refresh the page to continue.`;
+    if(here)return `Another cashier's shift is still open on this POS: ${here.display_name}, shift #${here.shift_id}.\n${managerAccess()?'Select Cancel, open Cashier shifts, count the drawer, and choose Manager close.':'Select Cancel and ask a manager to count and close it in Cashier shifts.'} Then open your shift. Signing out alone does not close a shift.`;
+    const yours=shifts.find(s=>s.cashier_user_id===S.user?.user_id);
+    if(yours)return `Your shift #${yours.shift_id} is still open on another POS. Finish any unpaid orders, count and close that shift there, then try again.`;
+  }catch{}
+  return `A cashier shift is already open for this account or POS.\n${managerAccess()?'Select Cancel, open Cashier shifts, count the drawer, and close the earlier shift.':'Select Cancel and ask a manager to check Cashier shifts, count the drawer, and close the earlier shift.'} Then try again. Signing out alone does not close a shift.`;
+}
+function openShift(continueToCheckout=false){formModal('Open your cashier shift',`<div class="field full"><small>Count the starting cash in this shift’s drawer. Only one shift can be open on this POS at a time.</small></div>`+field('Opening cash','opening_cash','text','0.00','required inputmode="decimal"'),async data=>{
+  try{await api('/shifts/open','POST',{opening_cash_minor:minor(data.opening_cash)});}
+  catch(error){throw new Error(await shiftOpenErrorMessage(error));}
+  closeModal();await boot();toast('Your shift is open.');if(continueToCheckout)checkoutModePrompt();
+},'Open shift');$('#modal-form').classList.add('shift-open-form');}
 async function cancelTicket(){await cartQueue;if(!S.ticket)return;formModal('Cancel this order',`<div class="field full"><small>This cancels the open ticket. Completed sales use a manager-approved correction.</small></div>`+field('Reason','reason','text','','required'),async data=>{await api('/tickets/'+S.ticket.purchase_ticket_id+'/cancel','POST',{reason:data.reason,version:S.ticket.version});closeModal();S.ticket=null;S.cart=[];await renderCheckout();toast('Order cancelled.');},'Cancel order');}
 async function transferTicket(){await cartQueue;if(!S.ticket)return;const {users}=await api('/filters');formModal('Transfer this order',selectField('Receiving cashier','target_user_id',users.filter(u=>u.user_id!==S.user.user_id).map(u=>[u.user_id,u.display_name]))+field('Reason','reason','text','','required')+`<div class="field full"><small>The receiving cashier must have an open shift and no current order. They can refresh their counter to retrieve this ticket.</small></div>`,async data=>{await api('/tickets/'+S.ticket.purchase_ticket_id+'/transfer','POST',{version:S.ticket.version,target_user_id:Number(data.target_user_id),reason:data.reason});closeModal();S.ticket=null;S.cart=[];await renderCheckout();toast('Order transferred. The receiving cashier can refresh their counter.');},'Transfer order');}
 function productImportForm(){
@@ -333,14 +487,28 @@ async function productForm(pid,draftId){
   if(draftId&&!draft)throw new Error('This imported product is no longer available.');
   if(!S.categories.length){formModal('Create your first category',field('Category name','name','text','','required'),async data=>{await api('/categories','POST',data);closeModal();await productForm(pid,draftId);},'Create category');return;}
   const categoryOptions=(draft?[['','Choose category']]:[]).concat(S.categories.filter(c=>c.active).map(c=>[c.category_id,c.name]));
-  formModal(p?'Edit product':draft?'Update uploaded product':'Add a product',field('SKU','sku','text',p?.sku||draft?.sku||'','required maxlength="60"')+field('Barcode (optional)','barcode','text',p?.barcode||'','maxlength="80"')+`<div class="field full"><label for="f-description">Product description</label><input id="f-description" name="description" value="${e(p?.description||draft?.description||'')}" required maxlength="200"></div>`+selectField('Category','category_id',categoryOptions,p?.category_id)+field('Unit','unit','text',p?.unit||(draft?'':'pc'),'required maxlength="20"')+field('Selling price','price','text',p?(p.amount_minor/100).toFixed(2):'','required inputmode="decimal"')+(!p?field('Opening quantity','quantity','number','0','required min="0" max="1000000" step="1"'):'')+selectField('Availability','active',[['true','Active'],['false','Inactive']],String(p?!!p.active:true))+`<div class="field full"><label for="f-image">Product photo (optional)</label><input id="f-image" name="image" type="file" accept="image/jpeg,image/png,image/webp"><small>JPEG, PNG, or WebP. Up to 5 MB and 12 megapixels.</small></div>`+(p?`<div class="field full" id="price-change-reason" hidden><label for="f-reason">Reason for price change</label><input id="f-reason" name="reason" maxlength="300" placeholder="For example, supplier cost changed" disabled><small>Required only when changing an existing selling price.</small></div>`:''),async(data,form)=>{
-    const body={...data,draft_id:draftId,category_id:Number(data.category_id),active:data.active==='true',amount_minor:minor(data.price)};
+  const draftCategoryId=draft?S.categories.find(c=>c.name.toLocaleLowerCase()===draft.category_name?.toLocaleLowerCase())?.category_id||'':'';
+  formModal(p?'Edit product':draft?'Update uploaded product':'Add a product',field('SKU','sku','text',p?.sku||draft?.sku||'','required maxlength="60"')+field('Barcode (optional)','barcode','text',p?.barcode||draft?.barcode||'','maxlength="80"')+`<div class="field full"><label for="f-description">Product description</label><input id="f-description" name="description" value="${e(p?.description||draft?.description||'')}" required maxlength="200"></div>`+field('Short description (optional)','short_description','text',p?.short_description||draft?.short_description||'','maxlength="120"')+selectField('Category','category_id',categoryOptions,p?.category_id||draftCategoryId)+field('Unit','unit','text',p?.unit||draft?.unit||'pc','required maxlength="20"')+field('Unit description (optional)','unit_description','text',p?.unit_description||draft?.unit_description||'','maxlength="80"')+field('Selling price','price','text',p?(p.amount_minor/100).toFixed(2):draft?.amount_minor?(draft.amount_minor/100).toFixed(2):'','required inputmode="decimal"')+(!p?field('Opening quantity','quantity','number','0','required min="0" max="1000000" step="1"'):'')+selectField('Availability','active',[['true','Active'],['false','Inactive']],String(p?!!p.active:true))+`<div class="field full"><label for="f-image">Product photo (optional)</label><input id="f-image" name="image" type="file" accept="image/jpeg,image/png,image/webp"><small>JPEG, PNG, or WebP. Up to 5 MB and 12 megapixels.</small></div>`+(p?`<div class="field full" id="price-change-reason" hidden><label for="f-reason">Reason for price change</label><input id="f-reason" name="reason" maxlength="300" placeholder="For example, supplier cost changed" disabled><small>Required only when changing an existing selling price.</small></div>`:''),async(data,form)=>{
+    const body={...data,draft_id:draftId,category_id:Number(data.category_id),active:data.active==='true',
+      unit_price_minor:minor(data.unit_price),selling_price_minor:minor(data.price)};
     if(!p){form.dataset.requestKey ||= key();body.quantity=Number(data.quantity);body.request_key=form.dataset.requestKey;}
     const result=await api(p?'/products/'+pid:'/products',p?'PUT':'POST',body);
     const image=$('[name=image]',form).files[0];
     if(image){const upload=new FormData();upload.append('image',image);try{await api('/products/'+result.product_id+'/image','POST',upload,true);}catch(error){toast('Product saved. Photo upload failed: '+error.message,true);closeModal();await loadCatalog();await navigate('catalog');return;}}
     closeModal();await loadCatalog();await navigate('catalog');toast(draft?'Uploaded product set up.':'Product saved.');
   },'Save product',true);
+  const unitPrice=p?.unit_price_minor??draft?.unit_price_minor??draft?.amount_minor;
+  const unitField=field(p?'Unit price (locked)':'Unit price','unit_price','text',
+    unitPrice?(unitPrice/100).toFixed(2):'',p?'readonly aria-readonly="true"':'required inputmode="decimal"');
+  $('#f-price').parentElement.insertAdjacentHTML('beforebegin',unitField);
+  $('#f-unit_price').parentElement.insertAdjacentHTML('beforeend',
+    `<small>${p?'Original company price. This field is locked after product setup.':'Original company price. It will be locked after saving.'}</small>`);
+  if(!p){
+    const unitInput=$('#f-unit_price'),sellingInput=$('#f-price');
+    let sellingEdited=false;
+    sellingInput.addEventListener('input',()=>{sellingEdited=true;});
+    unitInput.addEventListener('input',()=>{if(!sellingEdited)sellingInput.value=unitInput.value;});
+  }
   const productBarcode=$('#f-barcode');
   productBarcode.placeholder='Type or scan the label barcode';
   productBarcode.autocomplete='off';
@@ -351,44 +519,167 @@ async function productForm(pid,draftId){
     priceInput.addEventListener('input',updatePriceReason);priceInput.addEventListener('change',updatePriceReason);updatePriceReason();
   }
 }
-async function renderCatalog(){await loadCatalog();const drafts=S.productDrafts||[];$('#page').innerHTML=heading('Your products','A home for everything on your shelf.',button('New category','new-category','light','plus')+button('Add from Excel','bulk-upload-products','light','download')+button('Add product','new-product','green','plus'))+(drafts.length?`<div class="panel"><div class="panel-title"><h2>Products saved for later <span class="count-bubble">${drafts.length}</span></h2><span class="muted">Added and saved · set up anytime</span></div>${table(['Image','SKU','Description','Category','Price','Qty','Status',''],drafts.map(d=>`<tr><td class="muted">—</td><td><strong>${e(d.sku)}</strong></td><td>${e(d.description)}</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td><td>${pill('Set up later','warn')}</td><td>${button('Set up','complete-product','green','edit',`data-id="${d.product_import_draft_id}"`)}</td></tr>`))}</div>`:'')+`<div class="panel"><div class="panel-title"><h2>Product catalog <span class="count-bubble">${S.products.length}</span></h2><span class="muted">Prices include no added tax</span></div>${S.products.length?table(['Product','Category','Price','On hand','Status',''],S.products.map(p=>`<tr><td><div class="table-product"><div class="cart-thumb">${productVisual(p)}</div><div><strong>${e(p.description)}</strong><small>${e(p.sku)}${p.barcode?' · '+e(p.barcode):''}</small></div></div></td><td>${e(p.category_name)}</td><td>${money(p.amount_minor)}</td><td>${p.quantity_on_hand} ${e(p.unit)}</td><td>${pill(p.active?'Active':'Inactive',p.active?'success':'warn')}</td><td>${button('Edit','edit-product','light','edit',`data-id="${p.product_id}"`)}</td></tr>`)):empty('Start with your first product','Add one product or upload an Excel product list.','new-product','Add product')}</div>`;}
+async function renderCatalog(){await loadCatalog();const drafts=S.productDrafts||[];$('#page').innerHTML=heading('Your products','A home for everything on your shelf.',button('New category','new-category','light','plus')+button('Add from Excel','bulk-upload-products','light','download')+button('Add product','new-product','green','plus'))+(drafts.length?`<div class="panel"><div class="panel-title"><h2>Products saved for later <span class="count-bubble">${drafts.length}</span></h2><span class="muted">Added and saved · set up anytime</span></div>${table(['Image','SKU','Description','Category','Unit price','Selling price','Qty','Status',''],drafts.map(d=>`<tr><td class="muted">—</td><td><strong>${e(d.sku)}</strong></td><td>${e(d.description)}${d.short_description?`<br><small>${e(d.short_description)}</small>`:''}</td><td>${e(d.category_name||'—')}</td><td>${d.unit_price_minor?money(d.unit_price_minor):'—'}</td><td class="muted">Set during setup</td><td class="muted">—</td><td>${pill(d.import_issue||'Set up later','warn')}</td><td>${button('Set up','complete-product','green','edit',`data-id="${d.product_import_draft_id}"`)}</td></tr>`))}</div>`:'')+`<div class="panel"><div class="panel-title"><h2>Product catalog <span class="count-bubble">${S.products.length}</span></h2><span class="muted">Unit price is locked; selling price can change</span></div>${S.products.length?table(['Product','Category','Unit price','Selling price','On hand','Status',''],S.products.map(p=>`<tr><td><div class="table-product"><div class="cart-thumb">${productVisual(p)}</div><div><strong>${e(p.description)}</strong>${p.short_description?`<small>${e(p.short_description)}</small>`:''}<small>${e(p.sku)}${p.barcode?' · '+e(p.barcode):''}</small></div></div></td><td>${e(p.category_name)}</td><td>${money(p.unit_price_minor)}</td><td>${money(p.selling_price_minor??p.amount_minor)}</td><td>${p.quantity_on_hand} ${e(p.unit)}</td><td>${pill(p.active?'Active':'Inactive',p.active?'success':'warn')}</td><td>${button('Edit','edit-product','light','edit',`data-id="${p.product_id}"`)}</td></tr>`)):empty('Start with your first product','Add one product or upload an Excel product list.','new-product','Add product')}</div>`;}
 function stockForm(){
-  const p=S.products;if(!p.length)return productForm();
-  formModal('Record stock movement',selectField('Movement type','document_type',[['in','Stock in'],['opening','Opening stock'],['out','Stock out'],['count','Physical count'],['adjustment','Signed adjustment']])+selectField('Product','product_id',p.map(p=>[p.product_id,p.sku+' · '+p.description]))+field('Quantity / new count','quantity','number','','required step="1"')+field('Reference (optional)','reference_no','text','','maxlength="80"')+`<div class="field full"><small>For a physical count, enter the actual quantity on hand. For a signed adjustment, use a negative quantity to remove stock.</small></div>`+field('Reason (optional)','reason','text','','maxlength="300"')+`<div class="field full"><small id="stock-reason-help">Leave blank to record “Stock received” automatically.</small></div>`+approval(),async data=>{const requestId=$('#modal-form').dataset.requestKey||key();$('#modal-form').dataset.requestKey=requestId;await api('/stock','POST',{...data,request_key:requestId,lines:[{product_id:Number(data.product_id),quantity:Number(data.quantity)}]});closeModal();await loadCatalog();await renderInventory();toast('Stock movement posted.');},'Post stock');
-  const form=$('#modal-form'),typeInput=$('[name=document_type]',form),reasonInput=$('[name=reason]',form),reasonLabel=$('label[for="f-reason"]',form),reasonHelp=$('#stock-reason-help',form);
-  const updateStockReason=()=>{
-    const optional=['in','opening'].includes(typeInput.value);
-    reasonInput.required=!optional;reasonLabel.textContent=optional?'Reason (optional)':'Reason';
-    reasonHelp.textContent=optional?`Leave blank to record “${typeInput.value==='opening'?'Opening stock':'Stock received'}” automatically.`:'Explain the stock removal or correction for the audit trail.';
-  };
-  typeInput.addEventListener('change',updateStockReason);updateStockReason();
+  const products=S.products;
+  if(!products.length)return productForm();
+  const byId=new Map(products.map(p=>[p.product_id,p]));
+  const selected=new Set(),quantities=new Map();
+  let kind='in',search='',page=0,reference='',pendingPayload=null;
+  const pageSize=40;
+  const kindName=()=>kind==='opening'?'Opening stock':'Stock in';
+  const available=()=>products.filter(p=>kind!=='opening'||!p.has_stock_history);
+  const errorAt=form=>$('.form-error',form);
+  const setModal=(body)=>{modal('Record stock movement',body,true);$('.modal').classList.add('stock-modal');};
+  function selectStep(){
+    const legend=`<div class="stock-legend"><strong>What each movement type means</strong><div class="stock-legend-grid"><div class="stock-legend-item ${kind==='in'?'selected':''}"><strong>Stock in</strong><span>Add items you received, such as a new delivery.</span></div><div class="stock-legend-item ${kind==='opening'?'selected':''}"><strong>Opening stock</strong><span>Enter the first quantity for items with no stock history yet.</span></div></div></div>`;
+    setModal(`<div class="stock-step">Step 1 of 2 · Select items</div><form id="stock-select-form"><div class="form-grid">${selectField('Movement type','document_type',[['in','Stock in'],['opening','Opening stock']],kind)}${legend}<div class="field full"><label for="stock-search">Find products by name, SKU, or barcode</label><input id="stock-search" type="search" autocomplete="off" placeholder="Search your products" value="${e(search)}"></div></div><div class="stock-picker-head"><strong id="stock-selected-count"></strong><span id="stock-result-count"></span></div><div id="stock-picker" class="stock-picker"></div><div id="stock-picker-pages" class="stock-picker-pages"></div><div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green" id="stock-continue">Continue ${icon('arrow')}</button></div></form>`);
+    const form=$('#stock-select-form'),picker=$('#stock-picker'),pager=$('#stock-picker-pages');
+    const updateCount=()=>{const count=selected.size;$('#stock-selected-count',form).textContent=`${count} of 200 items selected`;$('#stock-continue',form).disabled=!count;};
+    function showProducts(){
+      const needle=search.trim().toLocaleLowerCase();
+      const matches=available().filter(p=>`${p.sku} ${p.description} ${p.barcode||''}`.toLocaleLowerCase().includes(needle));
+      const pages=Math.max(1,Math.ceil(matches.length/pageSize));page=Math.min(page,pages-1);
+      $('#stock-result-count',form).textContent=`${num(matches.length)} matching products`;
+      picker.innerHTML=matches.length?matches.slice(page*pageSize,(page+1)*pageSize).map(p=>`<label class="stock-picker-row"><input type="checkbox" value="${p.product_id}" ${selected.has(p.product_id)?'checked':''}><span><strong>${e(p.description)}</strong><small>${e(p.sku)}${p.barcode?' · '+e(p.barcode):''}</small></span><em>${num(p.quantity_on_hand)} on hand</em></label>`).join(''):`<p class="stock-picker-empty">${kind==='opening'&&!needle?'All products already have stock history. Choose Stock in for deliveries.':'No products match this search.'}</p>`;
+      pager.innerHTML=`<button type="button" class="btn light" data-stock-page="previous" ${page===0?'disabled':''}>Previous</button><span>Page ${page+1} of ${pages}</span><button type="button" class="btn light" data-stock-page="next" ${page>=pages-1?'disabled':''}>Next</button>`;
+      updateCount();
+    }
+    $('[name=document_type]',form).addEventListener('change',ev=>{kind=ev.target.value;selected.clear();quantities.clear();page=0;selectStep();});
+    $('#stock-search',form).addEventListener('input',ev=>{search=ev.target.value;page=0;showProducts();});
+    picker.addEventListener('change',ev=>{if(ev.target.type!=='checkbox')return;const id=Number(ev.target.value);if(ev.target.checked){if(selected.size>=200){ev.target.checked=false;errorAt(form).textContent='Choose up to 200 items at a time.';return;}selected.add(id);}else{selected.delete(id);quantities.delete(id);}errorAt(form).textContent='';updateCount();});
+    pager.addEventListener('click',ev=>{const direction=ev.target.closest('[data-stock-page]')?.dataset.stockPage;if(!direction)return;page+=direction==='next'?1:-1;showProducts();picker.scrollTop=0;});
+    form.addEventListener('submit',ev=>{ev.preventDefault();if(!selected.size){errorAt(form).textContent='Select at least one item.';return;}reviewStep();});
+    showProducts();
+  }
+  function reviewStep(){
+    const items=[...selected].map(id=>byId.get(id)).filter(Boolean).sort((a,b)=>a.description.localeCompare(b.description));
+    setModal(`<div class="stock-step">Step 2 of 2 · Review quantities</div><form id="stock-review-form"><p class="stock-review-intro">${kindName()} · ${items.length} ${items.length===1?'item':'items'}. Enter how many units to add beside each item.</p><div class="stock-review-list"><div class="stock-review-head"><span>Item</span><span>On hand</span><span>${kind==='opening'?'Starting qty':'Qty to add'}</span></div>${items.map(p=>`<div class="stock-review-row"><label for="stock-qty-${p.product_id}"><strong>${e(p.description)}</strong><small>${e(p.sku)}</small></label><span>${num(p.quantity_on_hand)}</span><input id="stock-qty-${p.product_id}" name="quantity-${p.product_id}" type="number" inputmode="numeric" step="1" min="1" max="1000000" required value="${quantities.get(p.product_id)||''}" aria-label="Quantity for ${e(p.description)}"></div>`).join('')}</div><div class="stock-review-total" id="stock-review-total"></div><div class="form-grid">${field('Reference number (optional)','reference_no','text',reference,'maxlength="80"')}${approval()}</div><div class="stock-warning" role="note"><strong>Review before saving.</strong> These quantities will be added to stock together. Posting creates a permanent stock record and cannot be undone here. Check every item and quantity carefully.</div><label class="stock-confirm"><input type="checkbox" name="reviewed" required> I checked all items and quantities and understand this posting cannot be undone.</label><div class="form-error" role="alert"></div><div class="modal-actions"><button type="button" class="btn light" id="stock-back">Back to items</button><button type="submit" class="btn green">Post ${items.length} ${items.length===1?'item':'items'} ${icon('arrow')}</button></div></form>`);
+    const form=$('#stock-review-form');
+    const lines=()=>items.map(p=>({product_id:p.product_id,quantity:Number($(`[name="quantity-${p.product_id}"]`,form).value)}));
+    const updateTotal=()=>{const values=lines();const valid=values.every(l=>Number.isSafeInteger(l.quantity)&&l.quantity>=1&&l.quantity<=1000000);$('#stock-review-total',form).textContent=valid?`${num(values.reduce((sum,l)=>sum+l.quantity,0))} total units will be added across ${items.length} items`:'Enter a positive whole-number quantity for every item.';};
+    form.addEventListener('input',ev=>{if(ev.target.type==='number'){quantities.set(Number(ev.target.name.slice(9)),ev.target.value);updateTotal();}if(ev.target.name==='reference_no')reference=ev.target.value;});
+    $('#stock-back',form).addEventListener('click',()=>{if(pendingPayload){errorAt(form).textContent='The last request may have posted. Check movement history before changing this list.';return;}selectStep();});
+    form.addEventListener('submit',async ev=>{
+      ev.preventDefault();if(!form.reportValidity())return;
+      const stockLines=lines();if(!stockLines.every(l=>Number.isSafeInteger(l.quantity)&&l.quantity>=1&&l.quantity<=1000000)){errorAt(form).textContent='Enter a positive whole-number quantity for every item.';return;}
+      const body={document_type:kind,reference_no:reference.trim(),manager_password:$('[name=manager_password]',form).value,lines:stockLines};
+      if(pendingPayload){const prior=pendingPayload;const same=JSON.stringify({...prior,request_key:undefined})===JSON.stringify({...body,request_key:undefined});if(!same){errorAt(form).textContent='The last request may have posted. Retry without changing the details, then check movement history.';return;}}
+      else pendingPayload={...body,request_key:key()};
+      const submit=$('[type=submit]',form);submit.disabled=true;errorAt(form).textContent='';
+      try{await api('/stock','POST',pendingPayload);closeModal();await loadCatalog();await renderInventory();toast(`${items.length} stock ${items.length===1?'item':'items'} posted together.`);}
+      catch(error){errorAt(form).textContent=error.message;if(error.status)pendingPayload=null;}
+      finally{submit.disabled=false;}
+    });
+    updateTotal();
+  }
+  selectStep();
 }
-async function renderInventory(){await loadCatalog();const {movements}=await api('/stock');const total=S.products.reduce((a,p)=>a+p.quantity_on_hand,0);$('#page').innerHTML=heading('Stock, accounted for.','Every item in and out leaves a record.',button('Record movement','new-stock','green','plus'))+`<div class="stats"><div class="stat featured"><label>Units on hand ${icon('box')}</label><div class="value">${num(total)}</div><small>Across ${S.products.length} products</small></div><div class="stat"><label>Out of stock</label><div class="value">${S.products.filter(p=>p.active&&!p.quantity_on_hand).length}</div><small>Active products with zero stock</small></div><div class="stat"><label>Low stock</label><div class="value">${S.products.filter(p=>p.active&&p.quantity_on_hand>0&&p.quantity_on_hand<6).length}</div><small>Fewer than 6 units on hand</small></div><div class="stat"><label>At selling price</label><div class="value">${money(S.products.reduce((a,p)=>a+p.quantity_on_hand*p.amount_minor,0))}</div><small>Stock value at current retail prices</small></div></div><div class="panel"><div class="panel-title"><h2>Movement history</h2><span class="muted">Latest 500 movements</span></div>${movements.length?table(['When','Product','Movement','Change','Cashier / manager','Reason'],movements.map(m=>`<tr><td>${e(timestamp(m.created_at))}<br><small class="muted">${m.day_number?'Day '+m.day_number:'Before Day 1'}</small></td><td><strong>${e(m.description)}</strong><br><small class="muted">${e(m.sku)}</small></td><td>${e(m.movement_type)}</td><td><strong class="${m.quantity_change>0?'positive':''}">${m.quantity_change>0?'+':''}${m.quantity_change}</strong></td><td>${e(m.display_name)}</td><td class="audit-reason">${e(m.reason||'From linked transaction')}</td></tr>`)):empty('A clear starting point','Record opening stock before your first sale.','new-stock','Add stock')}</div>`;}
+function inventoryPager(kind,page,total,size){
+  const pages=Math.max(1,Math.ceil(total/size)),first=total?(page-1)*size+1:0,last=Math.min(page*size,total);
+  return `<nav class="inventory-pager" aria-label="${kind==='product'?'Product':'Movement'} pages"><span>${num(first)}–${num(last)} of ${num(total)} · Page ${page} of ${pages}</span><div>${button('Previous','inventory-page','light','','data-kind="'+kind+'" data-step="-1" '+(page<=1?'disabled':''))}${button('Next','inventory-page','light','','data-kind="'+kind+'" data-step="1" '+(page>=pages?'disabled':''))}</div></nav>`;
+}
+async function renderInventory(){
+  const renderId=++inventoryRenderId;
+  const query=new URLSearchParams({q:inventoryFilters.q,category_id:inventoryFilters.category_id,from:inventoryFilters.from,to:inventoryFilters.to,product_page:String(inventoryFilters.product_page),movement_page:String(inventoryFilters.movement_page)});
+  const data=await api('/inventory?'+query);
+  if(renderId!==inventoryRenderId||S.page!=='inventory')return;
+  inventoryFilters.product_page=data.product_page;inventoryFilters.movement_page=data.movement_page;
+  const s=data.summary,view=inventoryFilters.view;
+  const categories=S.categories.map(c=>`<option value="${c.category_id}" ${String(c.category_id)===inventoryFilters.category_id?'selected':''}>${e(c.name)}</option>`).join('');
+  const filterForm=`<form class="inventory-filters" id="inventory-filters"><label>Product or SKU<input name="q" type="search" value="${e(inventoryFilters.q)}" placeholder="Search name, SKU, barcode" maxlength="120"></label><label>Category<select name="category_id"><option value="">All categories</option>${categories}</select></label><label>Posted from<input name="from" type="date" value="${e(inventoryFilters.from)}"></label><label>Posted to<input name="to" type="date" value="${e(inventoryFilters.to)}"></label><div class="inventory-filter-actions"><button class="btn green" type="submit">Apply</button>${button('Clear','inventory-clear','light')}</div></form>`;
+  const metrics=`<div class="inventory-metrics"><div><span>Closing units</span><strong>${num(s.closing)}</strong><small>${inventoryFilters.to?'As of end date':'On hand now'}</small></div><div><span>Stock added</span><strong>+${num(s.added)}</strong><small>Opening stock and receipts</small></div><div><span>Units sold</span><strong>−${num(s.sold)}</strong><small>Completed sales</small></div><div><span>Restocked</span><strong>+${num(s.restocked)}</strong><small>Sellable returns</small></div></div><div class="inventory-summary-strip"><span><strong>${num(s.products)}</strong> products</span><span><strong>${num(s.zero_products)}</strong> at zero stock</span><span><strong>${num(s.low_products)}</strong> low stock</span><span><strong>${money(s.retail_value_minor)}</strong> at current selling prices</span></div>`;
+  const tabs=`<div class="inventory-tabs" role="tablist" aria-label="Inventory views">${[['products','By product',data.product_total],['categories','By category',data.categories.length],['movements','Movements',data.movement_total]].map(([id,label,count])=>`<button type="button" role="tab" aria-selected="${view===id}" class="${view===id?'active':''}" data-action="inventory-view" data-view="${id}">${label}<span>${num(count)}</span></button>`).join('')}</div>`;
+  const numberHeader=label=>`<span class="inventory-number-head">${label}</span>`;
+  let detail='';
+  if(view==='products'){
+    const rows=data.products.map(p=>`<tr><td><strong>${e(p.description)}</strong><small>${e(p.sku)} · ${e(p.unit)}</small></td><td>${e(p.category_name)}</td><td class="numeric">${num(p.opening)}</td><td class="numeric">+${num(p.added)}</td><td class="numeric">−${num(p.sold)}</td><td class="numeric">+${num(p.restocked)}</td><td class="numeric strong">${num(p.closing)}</td><td>${!p.active?'<span class="inventory-status muted">Inactive</span>':p.closing===0?'<span class="inventory-status danger">Out</span>':p.closing<6?'<span class="inventory-status warn">Low</span>':'<span class="inventory-status">In stock</span>'}</td></tr>`);
+    detail=`<section class="panel inventory-detail"><div class="panel-title"><h2>Product balances</h2><span class="muted">${num(data.product_total)} matching products</span></div>${rows.length?table(['Product','Category',...['Opening','Added','Sold','Restocked','Closing'].map(numberHeader),'Status'],rows):`<div class="inventory-empty">No products match these filters.</div>`}${inventoryPager('product',data.product_page,data.product_total,data.product_page_size)}</section>`;
+  }else if(view==='categories'){
+    const rows=data.categories.map(c=>`<tr><td><button type="button" class="inventory-drill" data-action="inventory-category" data-id="${c.category_id}">${e(c.category_name)} ${icon('arrow')}</button></td><td class="numeric">${num(c.products)}</td><td class="numeric">${num(c.opening)}</td><td class="numeric">+${num(c.added)}</td><td class="numeric">−${num(c.sold)}</td><td class="numeric">+${num(c.restocked)}</td><td class="numeric strong">${num(c.closing)}</td><td class="numeric">${num(c.zero_products)}</td></tr>`);
+    detail=`<section class="panel inventory-detail"><div class="panel-title"><h2>Category balances</h2><span class="muted">Select a category to see its products</span></div>${rows.length?table(['Category',...['Products','Opening','Added','Sold','Restocked','Closing','At zero'].map(numberHeader)],rows):`<div class="inventory-empty">No categories match these filters.</div>`}</section>`;
+  }else{
+    const labels={sale:'Sold',restock:'Restocked',opening:'Opening stock',received:'Stock received'};
+    const rows=data.movements.map(m=>`<tr><td>${e(timestamp(m.created_at))}<small>${m.day_number?'Day '+num(m.day_number):'Before Day 1'}</small></td><td><strong>${e(m.description)}</strong><small>${e(m.sku)} · ${e(m.category_name)}</small></td><td>${e(labels[m.movement_type]||m.movement_type)}</td><td class="numeric strong ${m.quantity_change>0?'positive':''}">${m.quantity_change>0?'+':''}${num(m.quantity_change)}</td><td>${e(receiptNumber(m.reference_no)||'—')}</td><td>${e(m.display_name)}</td><td>${e(m.reason||'—')}</td></tr>`);
+    detail=`<section class="panel inventory-detail"><div class="panel-title"><h2>Stock movements</h2><span class="muted">All matching records · newest first</span></div>${rows.length?table(['Posted','Product','Type',numberHeader('Units'),'Reference','Recorded by','Reason'],rows):`<div class="inventory-empty">No movements match these filters.</div>`}${inventoryPager('movement',data.movement_page,data.movement_total,data.movement_page_size)}</section>`;
+  }
+  const period=inventoryFilters.from||inventoryFilters.to?`${inventoryFilters.from||'First record'} to ${inventoryFilters.to||'now'}`:'All posting dates';
+  $('#page').innerHTML=`<div class="inventory-page">${heading('Inventory','Balances and every stock movement, in one place.',button('Record movement','new-stock','green','plus'))}${filterForm}<div class="inventory-period">${e(period)} · ${e(data.timezone)} local posting time</div>${metrics}${tabs}${detail}<p class="inventory-help">Closing = Opening + Added + Restocked − Sold. A return changes stock only when sellable units are restocked. Date filters use posting time; the business day appears beside each movement. Retail value uses current selling prices.</p></div>`;
+  const form=$('#inventory-filters');
+  form.addEventListener('submit',async ev=>{ev.preventDefault();const values=Object.fromEntries(new FormData(form));Object.assign(inventoryFilters,values,{product_page:1,movement_page:1});try{await renderInventory();}catch(error){toast(error.message,true);}});
+  $$('select,input[type=date]',form).forEach(control=>control.addEventListener('change',()=>form.requestSubmit()));
+}
 
 function queryString(){return new URLSearchParams(Object.entries(S.filters).filter(([,v])=>v)).toString();}
-async function filterBar(){const f=await api('/filters');return `<div class="filters"><label>Business day<select data-filter="day_id"><option value="">All days</option>${f.days.map(d=>`<option value="${d.bazaar_day_id}" ${S.filters.day_id==d.bazaar_day_id?'selected':''}>Day ${d.day_number} · ${e(d.business_date)}</option>`).join('')}</select></label><label>From<input type="date" data-filter="from" value="${e(S.filters.from||'')}"></label><label>To<input type="date" data-filter="to" value="${e(S.filters.to||'')}"></label>${S.user.role==='manager'?`<label>Cashier<select data-filter="user_id"><option value="">All cashiers</option>${f.users.map(u=>`<option value="${u.user_id}" ${S.filters.user_id==u.user_id?'selected':''}>${e(u.display_name)}</option>`).join('')}</select></label>`:''}<label>Category<select data-filter="category_id"><option value="">All categories</option>${S.categories.map(c=>`<option value="${c.category_id}" ${S.filters.category_id==c.category_id?'selected':''}>${e(c.name)}</option>`).join('')}</select></label><label>Product<select data-filter="product_id"><option value="">All products</option>${S.products.map(p=>`<option value="${p.product_id}" ${S.filters.product_id==p.product_id?'selected':''}>${e(p.sku+' · '+p.description)}</option>`).join('')}</select></label></div>`;}
+async function filterBar(){const f=await api('/filters');return `<div class="filters"><label>Business day<select data-filter="day_id"><option value="">All days</option>${f.days.map(d=>`<option value="${d.bazaar_day_id}" ${S.filters.day_id==d.bazaar_day_id?'selected':''}>Day ${d.day_number} · ${e(d.business_date)}</option>`).join('')}</select></label><label>From<input type="date" data-filter="from" value="${e(S.filters.from||'')}"></label><label>To<input type="date" data-filter="to" value="${e(S.filters.to||'')}"></label>${managerAccess()?`<label>Cashier<select data-filter="user_id"><option value="">All cashiers</option>${f.users.map(u=>`<option value="${u.user_id}" ${S.filters.user_id==u.user_id?'selected':''}>${e(u.display_name)}</option>`).join('')}</select></label>`:''}<label>Category<select data-filter="category_id"><option value="">All categories</option>${S.categories.map(c=>`<option value="${c.category_id}" ${S.filters.category_id==c.category_id?'selected':''}>${e(c.name)}</option>`).join('')}</select></label><label>Product<select data-filter="product_id"><option value="">All products</option>${S.products.map(p=>`<option value="${p.product_id}" ${S.filters.product_id==p.product_id?'selected':''}>${e(p.sku+' · '+p.description)}</option>`).join('')}</select></label></div>`;}
 async function renderTransactions(){const filters=await filterBar();const {sales}=await api('/sales?'+queryString());$('#page').innerHTML=heading('Every sale has a story.','Open a receipt to review its items, payment, and linked corrections.',button('Clear filters','clear-filters','light','refresh'))+filters+`<div class="panel"><div class="panel-title"><h2>Transaction history</h2><span class="muted">Latest 500 matching sales</span></div>${sales.length?table(['Receipt','Day / time','Cashier','Total','Refunded',''],sales.map(s=>`<tr><td class="mono">${e(receiptNumber(s.receipt_number))}</td><td>Day ${s.day_number} · ${e(timestamp(s.completed_at))}</td><td>${e(s.display_name)}</td><td><strong>${money(s.total_minor)}</strong></td><td>${s.refunded_minor?money(s.refunded_minor):'—'}</td><td>${button('View receipt','view-receipt','light','receipt',`data-id="${s.sale_id}"`)}</td></tr>`)):empty('No sales in this view','Completed sales appear here. Try a different date or clear the filters.')}</div>`;}
 async function renderReports(){const filters=await filterBar();const r=await api('/reports?'+queryString());const t=r.summary;
-  const reportTable=(title,rows)=>`<div class="panel"><div class="panel-title"><h2>${title}</h2></div>${rows.length?table(['Description','Units','Sales','Refunds','Net'],rows.map(r=>`<tr><td><strong>${e(r.label)}</strong></td><td>${r.units}${r.returned_units?' / −'+r.returned_units:''}</td><td>${money(r.sales_minor)}</td><td>${money(r.refunds_minor)}</td><td><strong>${money(r.sales_minor-r.refunds_minor)}</strong></td></tr>`)):empty('Nothing to report yet','Sales and returns will appear here.')}</div>`;
-  $('#page').innerHTML=heading('A good look at your day.','Follow the numbers from each business day to every item.',button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${queryString()}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${money(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Gross sales</label><div class="value">${money(t.gross_minor)}</div><small>${t.units} units · ${t.transactions} transactions</small></div><div class="stat"><label>Refunds</label><div class="value">${money(t.refunds_minor)}</div><small>${t.returned_units} units returned or voided</small></div><div class="stat"><label>Average sale</label><div class="value">${money(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportTable('By business day',r.days)+`<div class="two-col">${reportTable('By category',r.categories)}${reportTable('By cashier',r.cashiers)}</div>`+reportTable('By product',r.items)+`<p class="muted"><small>Refunds belong to the day and cashier that processed them. Categories use the label recorded when sold. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
+  const unitLabel=(count,action)=>`${num(count)} ${count===1?'unit':'units'} ${action}`;
+  const reportTable=(title,rows)=>`<div class="panel"><div class="panel-title"><h2>${title}</h2></div>${rows.length?table(['Description','Unit counts','Sales','Refunds','Net'],rows.map(r=>`<tr><td><strong>${e(r.label)}</strong></td><td><div class="report-unit-count"><strong>${unitLabel(r.units,'sold')}</strong>${r.returned_units?`<span>${unitLabel(r.returned_units,'returned or voided')}</span>`:''}</div></td><td>${money(r.sales_minor)}</td><td>${money(r.refunds_minor)}</td><td><strong>${money(r.sales_minor-r.refunds_minor)}</strong></td></tr>`)):empty('No activity in this view','Sales and returns will appear here.')}</div>`;
+  $('#page').innerHTML=heading('A good look at your day.','Follow the numbers from each business day to every item.',button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${queryString()}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${money(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Gross sales</label><div class="value">${money(t.gross_minor)}</div><small>${unitLabel(t.units,'sold')} · ${t.transactions} transactions</small></div><div class="stat"><label>Refunds</label><div class="value">${money(t.refunds_minor)}</div><small>${unitLabel(t.returned_units,'returned or voided')}</small></div><div class="stat"><label>Average sale</label><div class="value">${money(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportTable('By business day',r.days)+`<div class="two-col">${reportTable('By category',r.categories)}${reportTable('By cashier',r.cashiers)}</div>`+reportTable('By product',r.items)+`<p class="muted"><small>Refunds belong to the day and cashier that processed them. Categories use the label recorded when sold. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
 }
 async function renderShifts(){
-  const {shifts}=await api('/shifts');S.shiftRows=shifts;
-  $('#page').innerHTML=heading('A balanced counter.','Opening cash, sales, refunds, and the final count.',S.shift?button('Cash in / out','cash-movement','light','plus',S.user.role!=='manager'?'hidden':'')+button('Close my shift','close-shift','green','clock'):button('Open my shift','open-shift','green','plus',!S.day?'disabled':''))+`<div class="panel"><div class="panel-title"><h2>Cashier shifts</h2><span class="muted">Each open shift has its own cash drawer</span></div>${shifts.length?table(['Cashier','Shift','Day','Opening cash','Expected','Counted','Variance','Status',''],shifts.map(s=>`<tr><td><strong>${e(s.display_name)}</strong></td><td>#${s.shift_id}</td><td>Day ${s.day_number}</td><td>${money(s.opening_cash_minor)}</td><td>${money(s.live_expected_minor)}</td><td>${s.counted_cash_minor===null?'—':money(s.counted_cash_minor)}</td><td>${s.variance_minor===null?'—':money(s.variance_minor)}</td><td>${pill(s.status,s.status==='open'?'success':s.variance_minor?'warn':'')}</td><td>${s.status==='open'&&S.user.role==='manager'?button('Manager close','manager-close-shift','light','shield',`data-id="${s.shift_id}"`):''}</td></tr>`)):empty('Your first shift starts here','Open the bazaar day, then count your starting cash.')}</div>`;
+  const pageSize=10;
+  const [openData,historyData]=await Promise.all([api('/shifts?status=open'),api(`/shifts?status=closed&page=${shiftHistoryPage}&page_size=${pageSize}`)]);
+  const openShifts=openData.shifts,closedShifts=historyData.shifts,total=historyData.total;
+  const pageCount=Math.max(1,Math.ceil(total/pageSize));
+  if(shiftHistoryPage>pageCount){shiftHistoryPage=pageCount;return renderShifts();}
+  S.shiftRows=openShifts;
+  const shiftTable=rows=>table(['Cashier','Shift','Day','Opening cash','Expected','Counted','Variance','Status',''],rows.map(s=>`<tr><td><strong>${e(s.display_name)}</strong></td><td>#${s.shift_id}</td><td>Day ${s.day_number}</td><td>${money(s.opening_cash_minor)}</td><td>${money(s.live_expected_minor)}</td><td>${s.counted_cash_minor===null?'—':money(s.counted_cash_minor)}</td><td>${s.variance_minor===null?'—':money(s.variance_minor)}</td><td>${pill(s.status,s.status==='open'?'success':s.variance_minor?'warn':'')}</td><td>${s.status==='open'&&managerAccess()?button('Manager close','manager-close-shift','light','shield',`data-id="${s.shift_id}"`):''}</td></tr>`));
+  const first=(shiftHistoryPage-1)*pageSize;
+  const pager=total?`<nav class="shift-pager" aria-label="Shift history pages">${button('Previous','shift-page','light','','data-step="-1" '+(shiftHistoryPage===1?'disabled':''))}<span>Page ${shiftHistoryPage} of ${pageCount} · ${first+1}–${first+closedShifts.length} of ${total}</span>${button('Next','shift-page','light','','data-step="1" '+(shiftHistoryPage===pageCount?'disabled':''))}</nav>`:'';
+  $('#page').innerHTML=heading('A balanced counter.','Open shifts and a paged history of closed shifts.',S.shift?button('Cash in / out','cash-movement','light','plus',!managerAccess()?'hidden':'')+button('Close my shift','close-shift','green','clock'):button('Open my shift','open-shift','green','plus',!S.day?'disabled':''))+`<div class="panel"><div class="panel-title"><h2>Open cashier shifts</h2><span class="muted">${openShifts.length} open${managerAccess()?' · managers can close each shift':''}</span></div>${openShifts.length?shiftTable(openShifts):'<p class="shift-no-open">No open shifts right now.</p>'}</div><div class="panel"><div class="panel-title"><h2>Shift history</h2><span class="muted">${total} closed shifts</span></div>${closedShifts.length?shiftTable(closedShifts)+pager:empty('No closed shifts yet','Completed shifts appear here.')}</div>`;
+}
+function askShiftCloseConfirmation(shift,counted,reason='',order=null){
+  return new Promise(resolve=>{
+    const original=$('#modal-root .modal-overlay'),overlay=document.createElement('div');
+    overlay.className='modal-overlay shift-confirm-overlay';
+    overlay.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="shift-confirm-title"><div class="modal-head"><h2 id="shift-confirm-title">Check the cash amount before closing</h2><button type="button" class="icon-btn" aria-label="Back to shift form" data-shift-confirm="back">${icon('close')}</button></div><div class="modal-body"><p class="payment-confirm-ticket">${e(shift.display_name)} · shift #${shift.shift_id}</p><dl class="payment-confirm-summary"><div><dt>Expected cash</dt><dd>${money(shift.live_expected_minor)}</dd></div><div><dt>Actual cash entered</dt><dd>${money(counted)}</dd></div><div><dt>Difference</dt><dd>${money(counted-shift.live_expected_minor)}</dd></div></dl>${reason?`<p class="shift-confirm-detail">Reason: ${e(reason)}</p>`:''}${order?`<p class="shift-confirm-detail">Unpaid order ${e(order.ticket_number)} will be canceled.</p>`:''}<label class="check-field shift-confirm-check"><input type="checkbox" id="shift-amount-checked">I checked the entered amount against the cash in the drawer.</label><div class="modal-actions"><button type="button" class="btn light" data-shift-confirm="back">Back to edit</button><button type="button" class="btn green" data-shift-confirm="yes" disabled>Confirm close shift${icon('check')}</button></div></div></section>`;
+    original.hidden=true;$('#modal-root').appendChild(overlay);
+    const checked=$('#shift-amount-checked',overlay),confirm=$('[data-shift-confirm=yes]',overlay);
+    checked.addEventListener('change',()=>{confirm.disabled=!checked.checked;});
+    let settled=false;
+    const finish=approved=>{
+      if(settled)return;settled=true;shiftConfirmationCancel=null;overlay.remove();original.hidden=false;
+      if(!approved&&original.isConnected)$('[name=counted_cash]',original)?.focus({preventScroll:true});
+      resolve(approved);
+    };
+    shiftConfirmationCancel=()=>finish(false);
+    overlay.addEventListener('click',ev=>{const choice=ev.target.closest('[data-shift-confirm]');if(choice&&!choice.disabled)finish(choice.dataset.shiftConfirm==='yes');});
+    checked.focus({preventScroll:true});
+  });
 }
 function managerCloseShift(sid){
   const s=S.shiftRows.find(s=>s.shift_id===sid),order=s.open_ticket;
-  formModal('Close cashier shift',`<div class="notice field full"><div><strong>${e(s.display_name)} · shift #${s.shift_id}</strong><br>Expected cash: ${money(s.live_expected_minor)}. Verify the payment outcome and actual drawer count before closing.</div></div>`+(order?`<div class="field full"><strong>Open unpaid order ${e(order.ticket_number)}</strong><small>${order.lines.map(l=>e(l.quantity+' × '+l.description)).join('<br>')||'Empty order'}</small><label class="check-field"><input type="checkbox" name="cancel_open_order" required>I reviewed this order and confirm its cancellation.</label></div>`:'')+field('Actual cash counted','counted_cash','text','','required inputmode="decimal"')+field('Reason for manager closure','reason','text','','required maxlength="300"')+approval(),async data=>{
-    await api('/shifts/'+sid+'/close','POST',{manager_password:data.manager_password,reason:data.reason,counted_cash_minor:minor(data.counted_cash),cancel_open_order:data.cancel_open_order==='on',purchase_ticket_id:order?.purchase_ticket_id||null,ticket_version:order?.version??null});
-    closeModal();await refreshState();await renderShifts();toast('Shift closed with the manager approval recorded.');
-  },'Close shift');
+  const reasons=[['','Select a reason'],['End of shift','End of shift'],['Cashier unavailable','Cashier unavailable'],['Cashier forgot to close shift','Cashier forgot to close shift'],['Manager counted the drawer','Manager counted the drawer'],['Shift opened by mistake','Shift opened by mistake'],['Other','Other — enter details']];
+  formModal('Close cashier shift',`<div class="shift-expected field full"><span class="shift-expected-context">${e(s.display_name)} · shift #${s.shift_id}</span><span class="shift-expected-label">Expected cash in drawer</span><strong>${money(s.live_expected_minor)}</strong><small>Verify the payment outcome and actual drawer count before closing.</small></div>`+(order?`<div class="field full"><strong>Open unpaid order ${e(order.ticket_number)}</strong><small>${order.lines.map(l=>e(l.quantity+' × '+l.description)).join('<br>')||'Empty order'}</small><label class="check-field"><input type="checkbox" name="cancel_open_order" required>I reviewed this order and confirm its cancellation.</label></div>`:'')+field('Actual cash counted','counted_cash','text',s.live_expected_minor===0?'0.00':'','required inputmode="decimal"')+selectField('Reason for manager closure','reason_choice',reasons,'','required')+`<div class="field full"><small>${s.live_expected_minor===0?'No cash is expected. Check the drawer: leave 0.00 if it is empty, including when this shift was opened by mistake. Enter any cash you find.':'Count the cash in the drawer and enter the amount you find.'}</small></div><div class="field full" id="other-shift-reason" hidden><label for="f-other_reason">Other reason</label><input id="f-other_reason" name="other_reason" type="text" maxlength="300" placeholder="Explain why this shift is being closed"></div>`+approval(),async data=>{
+    const counted=minor(data.counted_cash),reason=data.reason_choice==='Other'?data.other_reason.trim():data.reason_choice;
+    requireClient(reason,'Select or enter a reason for manager closure.');
+    if(!await askShiftCloseConfirmation(s,counted,reason,order))return;
+    await api('/shifts/'+sid+'/close','POST',{manager_password:data.manager_password,reason,counted_cash_minor:counted,cancel_open_order:data.cancel_open_order==='on',purchase_ticket_id:order?.purchase_ticket_id||null,ticket_version:order?.version??null});
+    closeModal();shiftHistoryPage=1;await refreshState();await navigate(S.page==='management'?'management':'shifts');toast('Shift closed with the manager approval recorded.');
+  },'Review closure');
+  const reasonSelect=$('#f-reason_choice'),otherField=$('#other-shift-reason'),otherInput=$('#f-other_reason');
+  reasonSelect.addEventListener('change',()=>{const other=reasonSelect.value==='Other';otherField.hidden=!other;otherInput.required=other;if(!other)otherInput.value='';});
 }
-async function closeShift(){const {shifts}=await api('/shifts');const current=shifts.find(s=>s.shift_id===S.shift.shift_id);formModal('Count and close your shift',`<div class="notice good field full">Expected cash: <strong>${money(current.live_expected_minor)}</strong></div>`+field('Actual cash counted','counted_cash','text','','required inputmode="decimal"')+`<div class="field full"><small>Complete or cancel your open ticket first. The actual count is recorded even when it differs from expected cash.</small></div>`,async data=>{const result=await api('/shifts/close','POST',{counted_cash_minor:minor(data.counted_cash)});closeModal();await boot();await navigate('shifts');toast('Shift closed. Cash variance: '+money(result.variance_minor));},'Close shift');}
+async function closeShift(){
+  const {shifts}=await api('/shifts?status=open'),current=shifts.find(s=>s.shift_id===S.shift.shift_id);
+  formModal('Count and close your shift',`<div class="shift-expected field full"><span class="shift-expected-label">Expected cash in drawer</span><strong>${money(current.live_expected_minor)}</strong></div>`+field('Actual cash counted','counted_cash','text',current.live_expected_minor===0?'0.00':'','required inputmode="decimal"')+`<div class="field full"><small>${current.live_expected_minor===0?'No cash is expected. Check the drawer: leave 0.00 if it is empty, or enter any cash you find.':'Count the cash in the drawer and enter the amount you find.'} Complete or cancel your open ticket first.</small></div>`,async data=>{
+    const counted=minor(data.counted_cash);
+    if(!await askShiftCloseConfirmation(current,counted))return;
+    const result=await api('/shifts/close','POST',{counted_cash_minor:counted});
+    closeModal();shiftHistoryPage=1;S.page=S.page==='management'?'management':'shifts';await boot();toast('Shift closed. Cash variance: '+money(result.variance_minor));
+  },'Review closure');
+}
 function cashMovement(){formModal('Record cash in / out',selectField('Direction','direction',[['in','Cash in'],['out','Cash out']])+field('Amount','amount','text','','required inputmode="decimal"')+field('Reason','reason','text','','required')+approval(),async data=>{const form=$('#modal-form');form.dataset.requestKey ||= key();await api('/cash-movements','POST',{...data,request_key:form.dataset.requestKey,amount_minor:minor(data.amount)});closeModal();await renderShifts();toast('Cash movement recorded.');},'Record cash');}
+function refundAmount(line,quantity){
+  const previous=line.returned_quantity||0;
+  return Math.floor((previous+quantity)*line.line_total_minor/line.quantity)-Math.floor(previous*line.line_total_minor/line.quantity);
+}
 async function returnSale(sid){
   const r=await api('/sales/'+sid),available=r.lines.filter(l=>l.quantity>l.returned_quantity);
   requireClient(available.length,'All items from this sale have already been returned or voided.');
-  formModal('Return or void sale',`<div class="notice field full">${e(receiptNumber(r.sale.receipt_number))} · Refunds are paid from your current open shift.</div>`+selectField('Correction type','correction_type',[['return','Return selected items'],['void','Void the entire sale']])+`<div class="field full"><div class="refund-line"><strong>Item</strong><small>Return qty</small><small>Restock qty</small></div>${available.map(l=>`<div class="refund-line"><div>${e(l.description_snapshot)}<small>${l.quantity-l.returned_quantity} remaining · ${money(l.unit_price_minor)} each</small><small id="refund-line-${l.sale_line_id}">Refund: ${money(0)}</small></div><input aria-label="Return quantity for ${e(l.description_snapshot)}" type="number" name="qty-${l.sale_line_id}" value="0" min="0" max="${l.quantity-l.returned_quantity}" step="1"><input aria-label="Restock quantity for ${e(l.description_snapshot)}" type="number" name="restock-${l.sale_line_id}" value="0" min="0" max="${l.quantity-l.returned_quantity}" step="1"></div>`).join('')}<small>Only restock sellable items. A void must include every sold item.</small></div><div class="change-line" role="status" aria-live="polite"><span>Refund to customer</span><strong id="refund-total">${money(0)}</strong></div><div class="field full"><small id="refund-help">Calculated from return quantities and original selling prices. Restock qty only changes inventory.</small></div>`+field('Reason','reason','text','','required')+approval(),async data=>{
+  formModal('Return or void sale',`<div class="notice field full">${e(receiptNumber(r.sale.receipt_number))} · Refunds are paid from your current open shift.</div>`+selectField('Correction type','correction_type',[['return','Return selected items'],['void','Void the entire sale']])+`<div class="field full"><div class="refund-line"><strong>Item</strong><small>Return qty</small><small>Restock qty</small></div>${available.map(l=>`<div class="refund-line"><div>${e(l.description_snapshot)}<small>${l.quantity-l.returned_quantity} remaining · ${money(l.line_total_minor)} paid for ${l.quantity} sold</small><small id="refund-line-${l.sale_line_id}">Refund: ${money(0)}</small></div><input aria-label="Return quantity for ${e(l.description_snapshot)}" type="number" name="qty-${l.sale_line_id}" value="0" min="0" max="${l.quantity-l.returned_quantity}" step="1"><input aria-label="Restock quantity for ${e(l.description_snapshot)}" type="number" name="restock-${l.sale_line_id}" value="0" min="0" max="${l.quantity-l.returned_quantity}" step="1"></div>`).join('')}<small>Only restock sellable items. A void must include every sold item.</small></div><div class="change-line" role="status" aria-live="polite"><span>Refund to customer</span><strong id="refund-total">${money(0)}</strong></div><div class="field full"><small id="refund-help">Calculated from what the customer actually paid after any discount. Restock qty only changes inventory.</small></div>`+field('Reason','reason','text','','required')+approval(),async data=>{
     const form=$('#modal-form');form.dataset.requestKey ||= key();
     const lines=available.filter(l=>Number(data['qty-'+l.sale_line_id])>0).map(l=>({sale_line_id:l.sale_line_id,quantity:Number(data['qty-'+l.sale_line_id]),restock_quantity:Number(data['restock-'+l.sale_line_id])}));
     const result=await api('/sales/'+sid+'/corrections','POST',{...data,request_key:form.dataset.requestKey,lines});
@@ -399,63 +690,198 @@ async function returnSale(sid){
     let total=0,valid=true;
     for(const line of available){
       const quantity=Number($(`[name="qty-${line.sale_line_id}"]`,form).value),lineValid=Number.isSafeInteger(quantity)&&quantity>=0&&quantity<=line.quantity-line.returned_quantity;
-      $(`#refund-line-${line.sale_line_id}`,form).textContent=lineValid?'Refund: '+money(quantity*line.unit_price_minor):'Enter a valid return quantity.';
-      if(lineValid)total+=quantity*line.unit_price_minor;else valid=false;
+      $(`#refund-line-${line.sale_line_id}`,form).textContent=lineValid?'Refund: '+money(refundAmount(line,quantity)):'Enter a valid return quantity.';
+      if(lineValid)total+=refundAmount(line,quantity);else valid=false;
     }
     $('#refund-total',form).textContent=valid?money(total):'—';
-    $('#refund-help',form).textContent=valid?'Calculated from return quantities and original selling prices. Restock qty only changes inventory.':'Enter whole return quantities within the remaining sold amounts.';
+    $('#refund-help',form).textContent=valid?'Calculated from what the customer actually paid after any discount. Restock qty only changes inventory.':'Enter whole return quantities within the remaining sold amounts.';
   };
   form.addEventListener('input',updateRefund);form.addEventListener('change',updateRefund);updateRefund();
 }
-async function renderTeam(){const {users}=await api('/team');S.team=users;$('#page').innerHTML=heading('A counter with your people.','Each action stays connected to the account that performed it.',button('Add account','new-user','green','plus'))+`<div class="panel"><div class="panel-title"><h2>Accounts</h2><span class="muted">Passwords are never displayed</span></div>${table(['Person','Username','Role','Status',''],users.map(u=>`<tr><td><strong>${e(u.display_name)}</strong></td><td class="mono">${e(u.username)}</td><td>${e(u.role)}</td><td>${pill(u.active?'Active':'Disabled',u.active?'success':'warn')}</td><td>${button('Manage','edit-user','light','edit',`data-id="${u.user_id}"`)}</td></tr>`))}</div>`;}
-function userForm(uid){const u=S.team?.find(u=>u.user_id===uid);formModal(u?'Manage account':'Create an account',field('Display name','display_name','text',u?.display_name||'','required')+(u?`<div class="field"><label>Username</label><input value="${e(u.username)}" disabled></div>`:field('Username','username','text','','required minlength="3" maxlength="50"'))+selectField('Role','role',[['cashier','Cashier'],['manager','Manager']],u?.role||'cashier')+selectField('Status','active',[['true','Active'],['false','Disabled']],String(u?!!u.active:true))+`<div class="field full"><label for="f-password">${u?'New password (leave blank to keep current)':'Password'}</label><input type="password" name="password" id="f-password" autocomplete="new-password" minlength="12" ${u?'':'required'}></div>`+approval(),async data=>{await api(u?'/users/'+uid:'/users',u?'PUT':'POST',{...data,active:data.active==='true'});closeModal();await renderTeam();toast('Account saved.');},'Save account');}
-async function renderAudit(){const {events}=await api('/audit');$('#page').innerHTML=heading('The details stay with you.','An append-only record of who did what, and when.',button('Refresh','refresh-page','light','refresh'))+`<div class="panel"><div class="panel-title"><h2>Audit trail</h2><span class="muted">Latest 500 events</span></div>${events.length?table(['Time','Person','Action','Record','Reason / details'],events.map(a=>`<tr><td>${e(timestamp(a.created_at))}</td><td>${e(a.display_name||a.attempted_username||'System')}</td><td class="mono">${e(a.action)}</td><td>${e(a.entity_type)} ${e(a.entity_key||'')}</td><td class="audit-reason">${e(a.reason||'—')}${a.after_json?`<br>${button('Details','audit-details','light small','',`data-id="${a.audit_event_id}"`)}`:''}</td></tr>`)):empty('A record from the start','Activity will appear here as your team uses the counter.')}</div>`;S.auditEvents=events;}
-async function renderSettings(){const [data,printing]=await Promise.all([api('/backups'),api('/receipt-printer')]);$('#page').innerHTML=heading('A few things behind the counter.','Your company, business day, and recovery copies.')+`<div class="two-col"><div class="panel"><div class="panel-title"><h2>Company settings</h2>${pill('Local workspace')}</div><div class="panel-body"><div class="setting-row"><div><h3>${e(S.bazaar.name)}</h3><p>${e(S.bazaar.currency_code)} · ${e(S.bazaar.timezone)}</p></div></div><div class="setting-row"><div><h3>${S.day?'Day '+S.day.day_number+' is open':'No day is open'}</h3><p>${S.day?e(S.day.business_date)+' · Close all shifts and tickets before closing the day.':'Open the next business day to start trading.'}</p></div>${button(S.day?'Close day':'Open day',S.day?'close-day':'open-day','light','sun')}</div><div class="setting-row"><div><h3>Cash checkout</h3><p>Whole units. No discounts or added tax configured.<br>Automatic receipts use the printer saved for this laptop.</p></div></div></div></div><div class="panel"><div class="panel-title"><h2>Backups</h2>${button('Back up now','backup','green','download')}</div><div class="panel-body"><div class="setting-row"><div><h3>Online snapshot, verified after creation</h3><p>Every 15 minutes while the server is running, at day close, and on request. Keep a copy on a separate drive.</p></div></div><div class="setting-row"><div><h3>Backup folder</h3><p class="mono">${e(data.directory)}</p></div></div><div class="setting-row"><div><h3>Restore with the server stopped</h3><p>Follow docs/operations.md. Restore into a new data folder, verify it, then switch the server to that folder.</p></div></div></div></div></div><div class="panel"><div class="panel-title"><h2>Recent backup runs</h2><span class="muted">No automatic deletion</span></div>${data.backups.length?table(['Started','Result','Verified','File'],data.backups.map(b=>`<tr><td>${e(timestamp(b.started_at))}</td><td>${pill(b.status,b.status==='verified'?'success':'error')}</td><td>${e(timestamp(b.verified_at))}</td><td class="audit-reason">${e(b.error_message||b.destination||'—')}</td></tr>`)):empty('Your first recovery copy','Create a backup after adding your opening catalog.','backup','Create backup')}</div>`;$('#page .page-heading').insertAdjacentHTML('afterend',printerSettingsPanel(printing));}
-function managerAction(title,description,path){formModal(title,`<div class="field full"><small>${e(description)}</small></div>`+approval(),async data=>{const result=await api(path,'POST',data);closeModal();await boot();await navigate('settings');toast(result.backup?.status==='failed'?'Day closed, but backup failed. Check Settings.':path==='/backups'?'Backup verified.':'Operation completed.',result.backup?.status==='failed');},title);}
+async function renderTeam(){const {users}=await api('/team');S.team=users;$('#page').innerHTML=heading('A counter with your people.','Each action stays connected to the account that performed it.',button('Add account','new-user','green','plus'))+`<div class="panel"><div class="panel-title"><h2>Accounts</h2><span class="muted">Passwords are never displayed</span></div>${table(['Person','Username','Role','Status',''],users.map(u=>`<tr><td><strong>${e(u.display_name)}</strong></td><td class="mono">${e(u.username)}</td><td>${e(roleLabel(u))}</td><td>${pill(u.active?'Active':'Disabled',u.active?'success':'warn')}</td><td>${u.role==='it_admin'&&u.user_id!==S.user.user_id?'<span class="muted" title="Only ginflorita can update this account">Locked</span>':button('Manage','edit-user','light','edit',`data-id="${u.user_id}"`)}</td></tr>`))}</div>`;}
+function userForm(uid){
+  const u=S.team?.find(u=>u.user_id===uid),locked=u?.role==='it_admin';
+  if(locked&&uid!==S.user.user_id)return toast('Only ginflorita can update this account.',true);
+  const roleField=locked?'<div class="field"><label>Role</label><span>IT System Administrator (locked)</span><input type="hidden" name="role" value="it_admin"></div>':selectField('Role','role',[['cashier','Cashier'],['manager','Manager']],u?.role||'cashier');
+  const statusField=locked?'<div class="field"><label>Status</label><span>Active (locked)</span><input type="hidden" name="active" value="true"></div>':selectField('Status','active',[['true','Active'],['false','Disabled']],String(u?!!u.active:true));
+  formModal(u?'Manage account':'Create an account',field('Display name','display_name','text',u?.display_name||'','required')+(u?`<div class="field"><label>Username</label><input value="${e(u.username)}" disabled></div>`:field('Username','username','text','','required minlength="3" maxlength="50"'))+roleField+statusField+`<div class="field full"><label for="f-password">${u?'New password (leave blank to keep current)':'Password'}</label><input type="password" name="password" id="f-password" autocomplete="new-password" minlength="12" ${u?'':'required'}></div>${locked?'<div class="field full"><small>Only ginflorita can update this account. Its role and active status are locked.</small></div>':''}`+approval(),async data=>{await api(u?'/users/'+uid:'/users',u?'PUT':'POST',{...data,active:data.active==='true'});closeModal();await renderTeam();toast('Account saved.');},'Save account');
+}
+function auditActionLabel(action){return ({'shift.closed_by_manager':'Manager closed shift','shift.closed':'Cashier closed shift'})[action]||action.replace(/[._]/g,' ').replace(/^./,c=>c.toUpperCase());}
+function auditRecordLabel(a){return a.entity_type==='shifts'?`Shift #${a.entity_key}`:`${a.entity_type.replaceAll('_',' ')} ${a.entity_key||''}`.trim();}
+function auditSnapshot(raw){try{return raw?JSON.parse(raw):null;}catch{return raw;}}
+function auditTechnicalDetails(a){
+  const before=auditSnapshot(a.before_json),after=auditSnapshot(a.after_json);
+  if(before===null&&after===null)return '';
+  return `<details class="audit-technical"><summary>Technical record</summary>${before!==null?`<strong>Before</strong><pre>${e(JSON.stringify(before,null,2))}</pre>`:''}${after!==null?`<strong>After</strong><pre>${e(JSON.stringify(after,null,2))}</pre>`:''}</details>`;
+}
+function auditDetails(a){
+  const after=auditSnapshot(a.after_json),shiftClose=a.entity_type==='shifts'&&['shift.closed','shift.closed_by_manager'].includes(a.action);
+  const fact=(label,value)=>`<div><dt>${e(label)}</dt><dd>${e(value)}</dd></div>`;
+  if(shiftClose&&after&&typeof after==='object'){
+    const cashier=a.subject_display_name||(after.cashier_user_id?`User #${after.cashier_user_id}`:'Unknown cashier');
+    const facts=fact('Cashier',cashier)+fact('Closed by',a.display_name||'System')+fact('Time',timestamp(a.created_at))+(a.reason?fact('Reason',a.reason):'')+
+      (Number.isInteger(after.expected_minor)?fact('Expected cash',money(after.expected_minor)):'')+
+      (Number.isInteger(after.counted_minor)?fact('Cash counted',money(after.counted_minor)):'')+
+      (Number.isInteger(after.variance_minor)?fact('Difference',money(after.variance_minor)):'');
+    modal(`Shift #${a.entity_key} closed`,`<div class="stack"><p>${e(auditActionLabel(a.action))}</p><dl class="audit-facts">${facts}</dl>${auditTechnicalDetails(a)}</div>`);
+    return;
+  }
+  const facts=fact('Action',auditActionLabel(a.action))+fact('Record',auditRecordLabel(a))+fact('Person',a.display_name||a.attempted_username||'System')+fact('Time',timestamp(a.created_at))+(a.reason?fact('Reason',a.reason):'');
+  modal('Audit event #'+a.audit_event_id,`<div class="stack"><dl class="audit-facts">${facts}</dl>${auditTechnicalDetails(a)}</div>`);
+}
+async function renderAudit(){const {events}=await api('/audit');$('#page').innerHTML=heading('The details stay with you.','An append-only record of who did what, and when.',button('Refresh','refresh-page','light','refresh'))+`<div class="panel"><div class="panel-title"><h2>Audit trail</h2><span class="muted">Latest 500 events</span></div>${events.length?table(['Time','Person','Action','Record','Reason / details'],events.map(a=>`<tr><td>${e(timestamp(a.created_at))}</td><td>${e(a.display_name||a.attempted_username||'System')}</td><td>${e(auditActionLabel(a.action))}</td><td>${e(auditRecordLabel(a))}</td><td class="audit-reason">${e(a.reason||'—')}${a.after_json?`<br>${button('Details','audit-details','light small','',`data-id="${a.audit_event_id}"`)}`:''}</td></tr>`)):empty('A record from the start','Activity will appear here as your team uses the counter.')}</div>`;S.auditEvents=events;}
+async function renderManagement(){
+  let card;
+  if(S.day){
+    const {shifts}=await api('/shifts?status=open');
+    const unpaid=shifts.filter(shift=>shift.open_ticket).length;
+    const dayNumber=S.day.day_number;
+    if(shifts.length){
+      const shiftText=`${shifts.length} ${shifts.length===1?'cashier shift is':'cashier shifts are'} still open.`;
+      const orderText=unpaid?` ${unpaid} unpaid ${unpaid===1?'order needs':'orders need'} to be completed or cancelled.`:'';
+      card=`<div class="eyebrow">Day ${dayNumber} · ${e(S.day.business_date)}</div><h2>Close cashier shifts first</h2><p>${shiftText}${orderText} Count each drawer and close its shift in Cashier shifts.</p><p class="business-day-note">You can close Day ${dayNumber} here when every shift is closed.</p><button type="button" class="btn green" data-page="shifts">${icon('clock')}Review cashier shifts</button>`;
+    }else{
+      card=`<div class="eyebrow">Day ${dayNumber} · ${e(S.day.business_date)}</div><h2>Ready to close Day ${dayNumber}</h2><p>All cashier shifts are closed. Close the day to save its final totals and create a backup.</p>${button(`Close Day ${dayNumber}`,'close-day','green','sun')}`;
+    }
+  }else{
+    card=`<h2>Start the next business day</h2><p>Choose the business date and enter your manager password. Cashiers can then open their shifts in Checkout.</p>${button('Open day','open-day','green','sun')}`;
+  }
+  $('#page').innerHTML=heading('Business day','Open and close each business day here.')+`<section class="panel business-day-card" aria-label="Next business day action"><div class="panel-body">${card}</div></section>`;
+}
+async function renderDiscounts(){
+  const config=await api('/discount');
+  $('#page').innerHTML=heading('Checkout discounts','Set the rates cashiers can choose for an order.')+discountSettingsPanel(config);
+}
+const BACKUP_PAGE_SIZE=8;
+async function renderBackups(){
+  const data=await api('/backups'),runs=data.backups||[];
+  const pageCount=Math.max(1,Math.ceil(runs.length/BACKUP_PAGE_SIZE));
+  backupPage=Math.max(0,Math.min(backupPage,pageCount-1));
+  const first=backupPage*BACKUP_PAGE_SIZE;
+  const visible=runs.slice(first,first+BACKUP_PAGE_SIZE);
+  const rows=visible.map(b=>`<tr><td>${e(timestamp(b.started_at))}</td><td>${pill(b.status,b.status==='verified'?'success':'error')}</td><td class="backup-file" title="${e(b.error_message||b.destination||'')}">${e(b.error_message||(b.destination||'').split(/[\\/]/).pop()||'—')}</td></tr>`);
+  const pager=runs.length>BACKUP_PAGE_SIZE?`<nav class="backup-pager" aria-label="Backup history pages">${button('Previous','backup-page','light','','data-step="-1" '+(backupPage===0?'disabled':''))}<span>Page ${backupPage+1} of ${pageCount} · ${first+1}–${Math.min(first+BACKUP_PAGE_SIZE,runs.length)} of ${runs.length}</span>${button('Next','backup-page','light','','data-step="1" '+(backupPage===pageCount-1?'disabled':''))}</nav>`:'';
+  $('#page').innerHTML=heading('Backups','Verified recovery copies for this POS.',button('Back up now','backup','green','download'))+`<div class="panel backup-overview"><div class="panel-body"><div><strong>Automatic backups</strong><p>Every 15 minutes while the server is running, at day close, and on request. Keep a copy on another drive.</p></div><div><strong>Backup folder</strong><p class="mono">${e(data.directory)}</p></div><div><strong>Restore</strong><p>Stop the server and follow docs/operations.md. Restore into a new folder, then verify before switching.</p></div></div></div><div class="panel backup-runs"><div class="panel-title"><h2>Recent backup runs</h2><span class="muted">Latest ${runs.length} · no automatic deletion</span></div>${runs.length?table(['Started','Result','File / issue'],rows)+pager:empty('Your first recovery copy','Create a backup after adding your catalog.','backup','Create backup')}</div>`;
+}
+async function renderPrinter(){
+  const data=await api('/receipt-printer');
+  $('#page').innerHTML=heading('Receipt printer','Set up printing for this laptop.')+printerSettingsPanel(data);
+}
+function managerAction(title,description,path){
+  formModal(title,`<div class="field full"><small>${e(description)}</small></div>`+approval(),async data=>{
+    const closingDay=S.day?.day_number;
+    const result=await api(path,'POST',data);
+    closeModal();
+    S.page=path==='/backups'?'backups':path==='/days/close'?'management':'checkout';
+    if(path==='/backups')backupPage=0;
+    await boot();
+    toast(result.backup?.status==='failed'?'Day closed, but backup failed. Check Backups.':path==='/backups'?'Backup verified.':path==='/days/close'?`Day ${closingDay} closed. Open the next day here.`:'Operation completed.',result.backup?.status==='failed');
+  },title);
+}
 
 document.addEventListener('click',async ev=>{
-  const target=ev.target.closest('button,[data-page],[data-category]');if(!target)return;
+  const target=ev.target.closest('button,[data-page]');if(!target)return;
   try{
-    if(target.dataset.page){if(S.paying)return;await cartQueue;if(target.dataset.page==='checkout')return checkoutModePrompt();return await navigate(target.dataset.page);}
-    if(target.dataset.category){S.category=target.dataset.category;renderCategories();renderProducts();return;}
+    if(target.dataset.page){if(S.paying)return;await cartQueue;if(target.dataset.page==='checkout')return requestCheckout();return await navigate(target.dataset.page);}
+    if(target.dataset.productPage){S.productPage+=target.dataset.productPage==='next'?1:-1;renderProducts();$('#product-grid').scrollTop=0;return;}
     if(target.dataset.add){await productQuantityModal(Number(target.dataset.add));return;}
-    if(target.dataset.qty){await addProduct(Number(target.dataset.qty),Number(target.dataset.delta));return;}
+    if(target.dataset.qty){try{await addProduct(Number(target.dataset.qty),Number(target.dataset.delta));}finally{$('#product-search')?.focus({preventScroll:true});}return;}
     if(target.dataset.cash){$('#amount-paid').value=(Number(target.dataset.cash)/100).toFixed(2);$('#amount-paid').dispatchEvent(new Event('input'));return;}
     const action=target.dataset.action;if(!action)return;
     const id=Number(target.dataset.id);
     const actions={
-      'checkout-standard':()=>openCheckoutMode(false),'checkout-fullscreen':()=>openCheckoutMode(true),'toggle-checkout-fullscreen':()=>checkoutFullscreen?exitCheckoutFullscreen():enterCheckoutFullscreen(),
-      'close-modal':closeModal,'boot':boot,'open-day':openDay,'open-shift':openShift,'close-shift':closeShift,'pay':paymentModal,
-      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'save-product-import':()=>savePendingProductImport(target),'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,'cash-movement':cashMovement,
+      'checkout-fullscreen':openCheckoutFullscreen,'toggle-checkout-fullscreen':()=>checkoutFullscreen?leaveCheckoutFullscreen():enterCheckoutFullscreen(),'toggle-management':toggleManagement,
+      'close-modal':closeModal,'boot':boot,'open-day':openDay,'open-shift':openShift,'close-shift':closeShift,'day-steps':async()=>{if(S.paying)return;await cartQueue;return navigate('management');},'pay':paymentModal,
+      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'set-cart-quantity':()=>setCartQuantityModal(id),'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'save-product-import':()=>savePendingProductImport(target),'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,'cash-movement':cashMovement,
       'new-user':()=>userForm(),'edit-user':()=>userForm(id),'manager-close-shift':()=>managerCloseShift(id),
       'view-product-image':()=>viewProductImage(id),'view-cart-description':()=>viewCartDescription(id),'view-receipt':()=>showReceipt(id),'return-sale':()=>returnSale(id),
-      'refresh-page':()=>navigate(S.page),'refresh-catalog':async()=>{await cartQueue;await refreshState();await renderCheckout();},
+      'refresh-page':()=>navigate(S.page),'backup-page':()=>{backupPage+=Number(target.dataset.step);return renderBackups();},
+      'inventory-view':()=>{inventoryFilters.view=target.dataset.view;return renderInventory();},
+      'inventory-page':()=>{const key=target.dataset.kind==='product'?'product_page':'movement_page';inventoryFilters[key]=Math.max(1,inventoryFilters[key]+Number(target.dataset.step));return renderInventory();},
+      'inventory-clear':()=>{Object.assign(inventoryFilters,{q:'',category_id:'',from:'',to:'',product_page:1,movement_page:1});return renderInventory();},
+      'inventory-category':()=>{inventoryFilters.category_id=String(id);inventoryFilters.product_page=1;inventoryFilters.movement_page=1;inventoryFilters.view='products';return renderInventory();},
+      'shift-page':()=>{shiftHistoryPage=Math.max(1,shiftHistoryPage+Number(target.dataset.step));return renderShifts();},
       'clear-filters':async()=>{S.filters={};await navigate(S.page);},
-      'logout':async()=>{await cartQueue;await api('/logout','POST',{});S.ticket=null;S.cart=[];S.page='checkout';await boot();},
+      'logout':async()=>{await cartQueue;await api('/logout','POST',{});S.ticket=null;S.cart=[];S.page='reports';history.replaceState(null,'',`${location.pathname}${location.search}`);await boot();},
       'new-category':()=>formModal('Add a category',field('Category name','name','text','','required'),async data=>{await api('/categories','POST',data);closeModal();await renderCatalog();toast('Category added.');},'Add category'),
-      'close-day':()=>managerAction('Close bazaar day','All shifts and open tickets must be closed. A backup runs after the day closes.','/days/close'),
+      'close-day':()=>managerAction(`Close Day ${S.day?.day_number||''}`,'All cashier shifts and unpaid orders must be closed. The POS will create a backup, then you can open the next day here.','/days/close'),
       'backup':()=>managerAction('Create backup','Create and verify a snapshot of the live database, including product images.','/backups'),
-      'pair-printer':pairPrinter,'configure-printer':configurePrinter,'refresh-printers':()=>renderSettings(),'start-print-helper':startPrintHelper,'resolve-print':()=>resolvePrint(id),'printer-copy':()=>queuePrinterCopy(id),
+      'add-discount':discountForm,'delete-discount':()=>deleteDiscount(id),
+      'pair-printer':pairPrinter,'configure-printer':configurePrinter,'disconnect-printer':disconnectPrinter,'refresh-printers':renderPrinter,'start-print-helper':startPrintHelper,'resolve-print':()=>resolvePrint(id),'printer-copy':()=>queuePrinterCopy(id),
       'print-receipt':async()=>{target.disabled=true;try{await api('/sales/'+id+'/reprint','POST',{});await showReceipt(id);window.print();}finally{target.disabled=false;}},
-      'audit-details':()=>{const a=S.auditEvents.find(a=>a.audit_event_id===id);modal('Audit event #'+id,`<div class="stack"><p><strong>${e(a.action)}</strong> · ${e(timestamp(a.created_at))}</p><p>${e(a.reason||'')}</p><label class="field">Before<textarea readonly rows="5">${e(a.before_json?JSON.stringify(JSON.parse(a.before_json),null,2):'—')}</textarea></label><label class="field">After<textarea readonly rows="8">${e(a.after_json?JSON.stringify(JSON.parse(a.after_json),null,2):'—')}</textarea></label></div>`);}
+      'audit-details':()=>{const a=S.auditEvents.find(a=>a.audit_event_id===id);if(a)auditDetails(a);}
     };
     if(actions[action])await actions[action]();
   }catch(error){toast(error.message,true);}
 });
-document.addEventListener('change',async ev=>{if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;await navigate(S.page);}});
-document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void exitCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$$('.modal').at(-1));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
+document.addEventListener('change',async ev=>{
+  if(ev.target.id==='checkout-category'){
+    S.category=ev.target.value;S.productPage=0;renderProducts();
+    $('#product-grid')?.scrollTo({top:0});$('#product-search')?.focus({preventScroll:true});
+    return;
+  }
+  if(ev.target.id==='discount-choice'){
+    const percent=Number(ev.target.value);
+    try{
+      await cartQueue;
+      requireClient(S.ticket&&!S.cartError,'Refresh the order before choosing a discount.');
+      requireClient(!localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`),'Review the previous payment result before changing this order.');
+      S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id+'/discount','PUT',{version:S.ticket.version,discount_percent_bp:percent});
+      renderCart();
+    }catch(error){
+      if(error.status===409&&S.ticket)try{S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id);}catch{}
+      renderCart();toast(error.message,true);
+    }
+    return;
+  }
+  if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;await navigate(S.page);}
+});
+document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void leaveCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$$('.modal').at(-1));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
 setInterval(async()=>{if(pollBusy||S.paying||document.hidden)return;pollBusy=true;try{const old=JSON.stringify([S.user?.user_id,S.day?.bazaar_day_id,S.shift?.shift_id]);const result=await refreshState();const next=JSON.stringify([result.user?.user_id,result.day?.bazaar_day_id,result.shift?.shift_id]);if(old!==next&&!$('.modal'))await boot();}catch{}finally{pollBusy=false;}},20000);
+setInterval(refreshCheckoutStock,30000);
 boot();
+
+function discountSettingsPanel(config){
+  const rates=config.rates||[];
+  return `<div class="panel discount-panel"><div class="panel-title"><h2>Available rates</h2>${button('Add rate','add-discount','green','plus')}</div><div class="discount-list">${rates.length?rates.map(rate=>`<div class="discount-rate-row"><strong>${percentLabel(rate.percent_bp)}</strong>${button('Delete','delete-discount','light small','close',`data-id="${rate.discount_rate_id}"`)}</div>`).join(''):'<p class="muted">No rates yet. Add a percentage for cashiers to choose.</p>'}</div><p class="list-note">Removing a rate clears it from open orders. Completed receipts keep the rate already charged.</p></div>`;
+}
+async function discountForm(){
+  formModal('Add checkout discount',field('Discount percentage','percentage','number','','required min="0.01" max="99" step="0.01"')+`<div class="field full"><small>Add a rate from 0.01% to 99%. Cashiers will see it in the order discount list.</small></div>`+approval(),async data=>{
+    const value=String(data.percentage).trim();
+    requireClient(/^\d{1,2}(\.\d{1,2})?$/.test(value)&&Number(value)>0&&Number(value)<=99,'Enter a percentage from 0.01 to 99, with up to two decimal places.');
+    await api('/discount','POST',{discount_percent_bp:Math.round(Number(value)*100),manager_password:data.manager_password});
+    closeModal();await renderDiscounts();toast('Discount rate added.');
+  },'Add rate');
+}
+async function deleteDiscount(id){
+  const {rates}=await api('/discount'),rate=rates.find(item=>item.discount_rate_id===id);
+  requireClient(rate,'This discount rate is no longer available. Refresh Discounts.');
+  formModal('Delete '+percentLabel(rate.percent_bp)+' discount',`<div class="field full"><p>Cashiers will no longer be able to choose this rate. Open orders using it will return to no discount and must be reviewed before payment. Completed receipts keep the discount already charged.</p></div>`+approval(),async data=>{
+    await api('/discount/'+id,'DELETE',{manager_password:data.manager_password});
+    closeModal();await renderDiscounts();toast(percentLabel(rate.percent_bp)+' discount removed.');
+  },'Delete rate');
+}
 
 function printerSettingsPanel(data){
   const p=data.printer;
   const paper=p?.paper_size==='letter'?'Letter':p?.paper_size==='roll_58'?'58 mm':'80 mm';
-  return `<div class="panel printer-settings"><div class="panel-title"><h2>Receipt printer · this laptop</h2>${pill(p?.enabled?'Automatic printing on':'Setup required',p?.enabled?'success':'warn')}</div><div class="panel-body"><div class="setting-row"><div><h3>${e(p?.printer_name||'No receipt printer selected')}</h3><p>${p?.online?'Print helper connected':'Print helper offline'}${p?.enabled?' · '+paper:''}<br>After Yes confirms payment, one receipt is queued automatically.</p></div></div><div class="notice">One-time manager setup: install the Windows printer driver, pair the helper, and choose the printer below. After setup, a cashier can use Connect printer in Checkout; the helper starts in the background without an Administrator prompt.</div><div class="actions printer-actions">${button('Pair print helper','pair-printer','light','laptop')}${button('Choose printer','configure-printer','green','print')}${button('Refresh status','refresh-printers','light','refresh')}</div><p class="muted">A queued job waits for the helper. Submitted means Windows accepted the job; check the printer for paper or device errors. A claimed job with no result needs review before another copy.</p></div>${data.jobs.length?table(['Receipt','Printer','Status',''],data.jobs.map(j=>`<tr><td>${e(receiptNumber(j.receipt_number))}</td><td>${e(j.printer_name)}</td><td>${e(j.status)}${j.error_message?'<br><small>'+e(j.error_message)+'</small>':''}</td><td>${['queued','claimed'].includes(j.status)?button('Review / close','resolve-print','light','',`data-id="${j.receipt_print_job_id}"`):''}</td></tr>`)):''}</div>`;
+  const status=p?.enabled?(p.online?'Ready to print':'Printer offline'):p?'Automatic printing off':'Not paired';
+  const pending=data.jobs.filter(j=>['queued','claimed'].includes(j.status));
+  const history=data.jobs.filter(j=>['submitted','failed'].includes(j.status));
+  const jobTable=jobs=>table(['Receipt','Printer','Status',''],jobs.map(j=>`<tr><td>${e(receiptNumber(j.receipt_number))}</td><td>${e(j.printer_name)}</td><td>${e(j.status)}${j.error_message?'<br><small>'+e(j.error_message)+'</small>':''}</td><td>${['queued','claimed'].includes(j.status)?button('Review / close','resolve-print','light','',`data-id="${j.receipt_print_job_id}"`):''}</td></tr>`));
+  return `<div class="panel printer-settings"><div class="panel-title"><h2>Receipt printer · this laptop</h2>${pill(status,p?.enabled&&p.online?'success':'warn')}</div><div class="panel-body"><div class="setting-row"><div><h3>${e(p?.printer_name||'No receipt printer selected')}</h3><p>${p?(p.online?'Print helper connected':'Print helper offline'):'No print helper paired'}${p?.enabled?' · '+paper:''}<br>${p?.enabled?'After Yes confirms payment, one receipt is queued automatically.':'Automatic printing is off. Browser Print / save PDF remains available.'}</p></div></div><div class="notice">Install the Windows printer driver, pair the helper, and choose the printer below. If the helper is offline, run Start-Print-Helper.cmd on this laptop. On the POS host, Connect printer can start a saved helper in the background.</div><div class="actions printer-actions">${button('Pair print helper','pair-printer','light','laptop')}${p?button('Choose printer','configure-printer','green','print'):''}${p&&!p.online&&canStartPrintHelper()?button('Connect printer','start-print-helper','light','print'):''}${p?button('Disconnect printer','disconnect-printer','light','close'):''}${button('Refresh status','refresh-printers','light','refresh')}</div>${pending.length?`<section class="printer-pending"><h3>Waiting or interrupted receipts</h3><p class="muted">A queued receipt waits for the helper. If printing was interrupted, check the printer and Windows queue before closing its record.</p>${jobTable(pending)}</section>`:''}<details class="printer-history"><summary>View recent print history${history.length?` (${history.length})`:''}</summary><p class="muted">Submitted means Windows accepted the job. Failed records remain here even after the printing issue is fixed.</p>${history.length?jobTable(history):'<p class="muted">No completed printer jobs yet.</p>'}</details></div></div>`;
+}
+function disconnectPrinter(){
+  formModal('Disconnect receipt printer',`<div class="field full"><p>Automatic receipt printing will stop on this laptop. The print helper pairing will be revoked.</p><p>Receipts waiting to print will be marked as not printed. Check each receipt before making another copy. A receipt already being sent to Windows must be reviewed and closed first.</p><p>To reconnect later, pair the helper again and choose a printer in Settings.</p></div>`,async()=>{
+    const result=await api('/receipt-printer','DELETE',{});
+    closeModal();S.receiptPrinter=null;await renderPrinter();
+    toast(result.cancelled_jobs?`Printer disconnected. ${result.cancelled_jobs} waiting receipt(s) need review.`:'Printer disconnected from this laptop.');
+  },'Disconnect printer');
 }
 async function pairPrinter(){
-  formModal('Pair this laptop’s print helper',`<div class="field full"><p>Run Start-Print-Helper.cmd on this laptop. Enter the POS address and the pairing code shown next.</p><p>Replacing a pairing disables automatic printing until you choose a printer again.</p></div>`,async()=>{
+  formModal('Pair this laptop’s print helper',`<div class="field full"><p>Double-click Pair-Print-Helper.cmd on this laptop. Enter the POS address and the pairing code shown next.</p><p>Replacing a pairing disables automatic printing until you choose a printer again.</p></div>`,async()=>{
     const r=await api('/receipt-printer/pair','POST',{});
-    modal('Print helper pairing code',`<p>Shown once. Enter this code in Start-Print-Helper.cmd on this laptop.</p><div class="field"><label for="printer-pairing-code">Pairing code</label><input id="printer-pairing-code" readonly value="${e(r.pairing_token)}"></div><p>POS address: <strong>${e(location.origin)}</strong></p><p>For a LAN connection, enter the trusted POS certificate file when the helper asks. Keep the helper running, close this dialog, then click Refresh status and Choose printer.</p><div class="modal-actions">${button('Done','close-modal','green')}</div>`);
+    modal('Print helper pairing code',`<p>Shown once. Double-click Pair-Print-Helper.cmd on this laptop and enter this code. If an old helper is still closing, wait a few seconds and try again.</p><div class="field"><label for="printer-pairing-code">Pairing code</label><input id="printer-pairing-code" readonly value="${e(r.pairing_token)}"></div><p>POS address: <strong>${e(location.origin)}</strong></p><p>For a LAN connection, enter the trusted POS certificate file when the helper asks. Keep the helper running, close this dialog, then click Refresh status and Choose printer.</p><div class="modal-actions">${button('Done','close-modal','green')}</div>`);
   },'Create pairing code');
 }
 async function configurePrinter(){
@@ -463,10 +889,10 @@ async function configurePrinter(){
   if(!p)throw new Error('Pair the print helper on this laptop first.');
   const names=[...new Set([p.printer_name,...p.available_printers])].filter(Boolean);
   formModal('Receipt printer for this laptop',`<div class="field full"><small>${p.online?'Print helper connected.':'Start the print helper, then refresh Settings to detect printers.'}</small></div>`+selectField('Printer','printer_name',[['','Choose a Windows printer'],...names.map(n=>[n,n])],p.printer_name)+selectField('Paper size','paper_size',[['letter','Letter · 8.5 × 11 in'],['roll_80','80 mm receipt roll'],['roll_58','58 mm receipt roll']],p.paper_size||('roll_'+p.paper_width_mm))+selectField('Automatic printing after payment','enabled',[['false','Off — manual browser printing'],['true','On — use this printer']],String(!!p.enabled)),async data=>{
-    await api('/receipt-printer','PUT',{printer_name:data.printer_name,paper_size:data.paper_size,enabled:data.enabled==='true'});closeModal();await renderSettings();toast('Printer settings saved for this laptop.');
+    await api('/receipt-printer','PUT',{printer_name:data.printer_name,paper_size:data.paper_size,enabled:data.enabled==='true'});closeModal();await renderPrinter();toast('Printer settings saved for this laptop.');
   },'Save printer');
 }
-function resolvePrint(id){formModal('Review interrupted printing',`<div class="field full"><small>Check the printer and its Windows queue first. Closing this record cannot stop a job already being printed. Stop the helper and cancel any unwanted Windows job before making a copy.</small></div>`+field('What did you check?','reason','text','','required maxlength="300"'),async data=>{await api('/receipt-printer/jobs/'+id+'/resolve','POST',data);closeModal();await renderSettings();},'Close pending record');}
+function resolvePrint(id){formModal('Review interrupted printing',`<div class="field full"><small>Check the printer and its Windows queue first. Closing this record cannot stop a job already being printed. Stop the helper and cancel any unwanted Windows job before making a copy.</small></div>`+field('What did you check?','reason','text','','required maxlength="300"'),async data=>{await api('/receipt-printer/jobs/'+id+'/resolve','POST',data);closeModal();await renderPrinter();},'Close pending record');}
 async function queuePrinterCopy(sid){
   formModal('Print another receipt copy?',`<div class="field full"><p>Check the printer and Windows queue first. This creates another paper copy of the saved sale.</p></div>`,async()=>{await api('/sales/'+sid+'/printer-copy','POST',{});await showReceipt(sid);toast('Receipt copy queued.');},'Print copy');
 }

@@ -1,21 +1,29 @@
 # Verification record
 
-Updated: 2026-10-20 (Asia/Taipei). Release: 0.1. Test/demo data is separate from `data/pos.sqlite3`.
+Updated: 2026-11-11 (Asia/Taipei). Release: 0.1. Test/demo data is separate from `data/pos.sqlite3`.
 
 Run `python -m unittest discover -s tests -v`. Integration tests use isolated SQLite files in ignored `.test-runs/` directories and separate cookie sessions.
 
-Latest result: **27 tests passed** in 63.535 seconds. JavaScript syntax validation with `node --check static/app.js` also passed.
+Latest result: **44 tests passed**. JavaScript syntax validation with `node --check static/app.js` also passed.
 
 ## Automated coverage
 
 - Repeated and concurrent checkout requests produce one sale/payment/stock deduction.
+- Managers can disconnect a printer from Settings. The helper token is revoked, waiting jobs are marked failed with an audit record, and an already claimed job blocks disconnection until reviewed. A cashier cannot disconnect the printer. The 30-second background catalog read does not extend an idle login session.
+- Printer Settings shows queued and claimed jobs directly; older submitted and failed entries sit under **View recent print history**. The pending list remains complete even when more than 15 newer completed jobs exist. Historical print records are retained.
+- Checkout no longer shows the connected-printer badge, payment confirmation printer panel, or manual stock-refresh button. The active checkout refreshes changed catalog and stock data every 30 seconds without replacing the search or current order. The restarted local server returned HTTP 200 and served the updated JavaScript; its existing printer pairing remained in place.
 - A different request key cannot create another sale for a completed ticket; changed contents cannot reuse a key.
 - Two cashiers race for the last unit: one succeeds and stock stays nonnegative.
 - Price changes force review; old receipt descriptions/prices remain unchanged.
+- New sales save each product's short description for the on-screen and printed receipt; blank short descriptions fall back to the long description. Later product edits do not change the saved receipt name. The version 8 upgrade passed on both a copy and the live database: 25 sales, 54 sale lines, and 44,092 stock units were unchanged; integrity, foreign keys, and stock reconciliation passed. The live pre-upgrade backup is `data/backups/before-short-receipt-v8-20261111-110423.sqlite3`; the restarted local server returned HTTP 200 and served the new browser receipt code.
+- The original company unit price is locked in the API and database; selling price changes create history and change checkout totals. A version 6 migration on a live-database copy preserved all 882 existing current prices as unit prices, all 197 drafts, and 24 completed sales. The live version 7 migration passed integrity and foreign-key checks, with selling prices and stock unchanged.
 - Cashier permissions, receipt ownership, CSRF, Origin, and trusted Host checks.
 - Stale cart versions and ticket ownership transfer.
 - Stock/refund idempotency, return limits, and explicit restocking.
-- Stock-in/opening stock accept omitted or blank reasons with automatic audit text; equivalent retries do not add stock twice and changed reasons cannot reuse a request key. Stock-out, physical counts, and signed adjustments still reject blank reasons.
+- Stock-in/opening stock accept omitted or blank reasons with automatic audit text; equivalent retries do not add stock twice and changed reasons cannot reuse a request key. Manual stock-out, physical counts, and signed adjustments are rejected even with a reason.
+- Bulk stock posting of two items creates one document with two lines, changes both balances, and is safe to retry. An invalid line rolls back the entire posting. The catalog marks products with prior stock history so opening stock can be limited to eligible items in the picker.
+- Managers can add multiple distinct discount rates and delete them with password confirmation. Cashiers can select only saved rates. Deleting a selected rate clears it from open tickets and invalidates earlier payment quotes, while completed sales keep their saved percentage. A version 4 database migrates its single rate and open-ticket selection into the current schema.
+- Product records retain separate long and short descriptions and unit code and description. A trial import of the eight-column masterlist into a copy of the live database mapped all seven product and price fields for 878 ready rows with zero mismatches; 149 rows had missing prices, duplicate item codes/barcodes, or missing categories. The live import retained the previous 24 sales, 24 payments, 55 stock movements, and 9 stock documents, and database integrity and foreign keys passed after migration to version 6.
 - Day 2 refunds leave Day 1 totals unchanged.
 - Failed checkout rolls back financial and inventory records together.
 - Historical database rows cannot be edited/deleted; negative stock is rejected.
@@ -72,7 +80,7 @@ On 2026-10-20, checked the simplified product forms in the separate demo workspa
 
 ![Product editing without repeated password confirmation](screenshots/product-form.png)
 
-Also checked the stock movement form: **Stock in** and **Opening stock** label the reason optional and remove its browser-required flag. Switching to **Stock out** restores the required flag and explanation. The form describes the default audit text for each incoming movement. No stock was posted during this browser check.
+The stock movement form now offers **Stock in** and **Opening stock** only. It explains both incoming movement types and does not ask for a reason. This supersedes the earlier browser check of stock-out fields.
 
 ![Stock-in with an optional reason](screenshots/stock-reason.png)
 
@@ -92,7 +100,7 @@ The direct-print update passed two focused regression tests in 2.814 seconds (`p
 
 ![Receipt after a direct print request without a reason form](screenshots/direct-print.png)
 
-The return form now displays a live refund per item and total using the original sale prices. Browser verification on demo receipt `BZ-001-000010` confirmed return qty 0 → ₱0.00, return qty 1 → ₱150.00, and restock qty 0 or 1 → the same ₱150.00 refund. Return qty 2, exceeding the one remaining item, showed a validation message and no monetary total. JavaScript syntax and whitespace checks passed. No correction was posted during this check; backend refund calculation was unchanged.
+The earlier return-form browser check used original sale prices because discounts were unavailable then. The current return form and backend now calculate refunds from the amount actually paid after a selected discount, while restock quantity continues to affect inventory only.
 
 ![Live refund amount with return qty one and restock qty zero](screenshots/refund-preview.png)
 
@@ -108,7 +116,7 @@ HTTPS startup was verified on loopback with a generated local certificate and ce
 
 Complete a sale from each physical laptop; disconnect/reconnect Laptop 2 during confirmation; check printer failure/reprint; reconcile both cash drawers; verify the external backup drive and a restore; rehearse a power interruption; confirm actual currency, tax treatment, receipt content, and dates.
 
-Fractional quantities, non-cash payments, tax/discount configuration, additional bazaar creation, Windows startup-service installation, and automatic backup deletion are outside version 0.1.
+Fractional quantities, non-cash payments, statutory discount/tax handling, additional bazaar creation, Windows startup-service installation, and automatic backup deletion are outside version 0.1. The manager-set order percentage is supported.
 
 ## Separate laptop receipt printers — 2026-10-20
 

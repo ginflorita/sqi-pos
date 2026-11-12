@@ -8,13 +8,13 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 
 | Area | Available in version 0.1 |
 | --- | --- |
-| Products | Unique SKU, optional barcode, description, category, unit, product images, price history, and Excel bulk upload with records saved for later updates |
-| Inventory | Opening stock, stock in/out, physical counts, adjustments, and movement history |
-| Checkout | Optional fullscreen with no sidebar, name/SKU/barcode search, a dedicated scanner or manual barcode field with quantity confirmation before adding, saved tickets, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
+| Products | Unique SKU, optional barcode, description, category, unit, locked company unit price, adjustable selling price history, product images, and Excel bulk upload |
+| Inventory | Opening stock, stock receipts, sales-linked deductions, returns, and movement history |
+| Checkout | Optional fullscreen with no sidebar, name/SKU/barcode search, a dedicated scanner or manual barcode field with quantity confirmation before adding, saved tickets, cashier selection from manager-set discount rates, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
 | Accounts | Named managers/cashiers, account-only sign-in, password confirmation for sensitive changes, and expiring sessions |
 | Bazaar days | Day 1, Day 2, etc., cashier shifts, opening/closing cash counts, and cash variance |
-| Corrections | Manager-approved returns/voids, live refund calculation from original sale prices, explicit restocking, and cash in/out |
+| Corrections | Manager-approved returns/voids, refunds based on the amount paid after any discount, explicit restocking, and cash in/out |
 | Reports | Business-date span, day, product, category, and cashier filters, with a formatted Excel workbook export |
 | Audit and recovery | Append-only audit events, verified database backups, and restore into a new folder |
 
@@ -45,7 +45,7 @@ cd sqi-pos
 .\Start-POS.cmd
 ```
 
-If you downloaded the offline Windows ZIP, skip the `git clone` and `cd sqi-pos` commands above, extract the complete ZIP, and double-click `Install-POS.cmd`. When Python is missing, the bundled official installer runs for the current Windows user. Installation creates `.venv` and uses the bundled dependency wheels without internet. Complete first-time setup with `Start-POS.cmd`. After the two-PC HTTPS setup, run `Setup-Host-Shortcut.cmd` once on the main laptop. It creates an **SQI POS** desktop icon and starts the server automatically when that Windows user signs in. The icon also starts the server if needed, waits until it is ready, and opens the browser. `Start-POS.cmd` remains available for manual troubleshooting.
+If you downloaded the offline Windows ZIP, skip the `git clone` and `cd sqi-pos` commands above, extract the complete ZIP, and double-click `Install-POS.cmd`. When Python is missing, the bundled official installer runs for the current Windows user. Installation creates `.venv` and uses the bundled dependency wheels without internet. Complete first-time setup with `Start-POS.cmd`. After the two-PC HTTPS setup, run `Setup-Host-Shortcut.cmd` once on the main laptop. It creates a **Start SQI POS** desktop icon and starts the server automatically when that Windows user signs in. The icon also starts the LAN HTTPS server if needed, waits until it is ready, and opens the browser. `Start-POS.cmd` remains available for manual troubleshooting.
 
 **Keeping existing records:** back up and stop the old server before moving its complete `data` folder to a new main laptop. Preserve `data`, `backups`, certificates, and print-helper configuration when updating application files. GitHub contains application code, not your live records.
 
@@ -64,11 +64,15 @@ For the second laptop, complete the [two-PC HTTPS setup](docs/two-pc-setup.md), 
 
 You create the production manager credentials during setup. Setup must be completed on the main PC.
 
-Signed-in managers can add or edit products and photos without entering their password again. A reason is required only when changing an existing selling price. Product changes still record the manager, time, and changed details in the audit trail. Financial, stock, and account approvals retain password confirmation.
+Signed-in managers can add or edit products and photos without entering their password again. Each product has a company unit price that is locked after creation and a selling price that checkout charges. Existing products start with both prices equal to the former current price. A reason is required when changing an existing selling price. Product changes record the manager, time, and changed details in the audit trail. Financial, stock, and account approvals retain password confirmation.
 
 For a large product list, open **Products → Add from Excel** and choose an `.xlsx` workbook containing `ITEM CODE` and `DESCRIPTION` headers. Only those two columns are read. Select **Show uploaded products** to preview every valid row without saving it. Review the list, then select **Save all, set up later** above the list; repeated and existing SKUs are skipped. Imported rows remain under **Products saved for later** with image, category, price, and quantity blank. Use **Set up** whenever you are ready to add selling details and an opening quantity; the item stays out of checkout until then.
 
-Adding stock through **Stock in** or **Opening stock** needs no manual reason: a blank field records `Stock received` or `Opening stock` automatically. Stock-out, physical counts, and signed adjustments still require a reason.
+The eight-column masterlist uses `tools/import_masterlist.py` for a reviewed local import. It maps item code, barcode, long and short descriptions, unit code and description, price, and category into separate database fields. Rows with missing prices or conflicting item codes/barcodes remain pending, with their Excel row numbers in a review file. The workbook has no stock quantity column, so imported products begin with zero stock until a manager records stock.
+
+Managers record **Opening stock** once for a new item and **Stock in** for received deliveries. In **Inventory → Record movement**, they can search and select up to 200 items, enter a quantity beside each, review the total, confirm with their password, and post them together. The POS records `Opening stock` or `Stock received` automatically, along with the manager and time. Completed sales deduct stock; approved returns can restock it. Manual stock-out, physical count resets, and signed adjustments are disabled so the balance follows recorded transactions.
+
+The `ginflorita` account is the **IT System Administrator**. It retains all manager features. Only the signed-in `ginflorita` user can change that account's display name or password; its role and active status are locked. An existing `ginflorita` manager account is upgraded when the main POS server next starts.
 
 ![First-time POS setup](docs/screenshots/first-setup.png)
 
@@ -108,6 +112,8 @@ In **Reports**, choose the date range and any day, cashier, category, or item fi
 
 Save each product's unique barcode under **Products**. In **Checkout**, use **Search by name, SKU, or barcode** to browse matching products, or click **Scan or type barcode** and scan a label or type its code, then press **Enter** or **Find item**. A scanner that acts as a keyboard and sends Enter after the code uses the same field. Matching opens **Choose quantity**; nothing is added until the cashier confirms. If the scanner has no Enter suffix, press **Find item** after scanning. Each cashier laptop uses its own scanner; the second laptop still connects to the single POS server on the main laptop.
 
+The checkout product area shows 24 matching products at a time with **Previous** and **Next** controls. Search and category filters cover the full catalog, including products on other pages. The order stays beside the catalog on wide screens and moves above it on narrow screens.
+
 ## Backups and restore
 
 Verified online backups run every 15 minutes while the server is running, at day close, and on request. The default folder is `backups/`. Set a separate drive or destination when starting the host:
@@ -143,7 +149,7 @@ Open **http://localhost:8766**. Demo credentials are `demo` / `Bazaar-demo-2026!
 
 ## Current scope
 
-Version 0.1 supports cash payments, whole quantities, one active bazaar, one open ticket per cashier, separate cash drawers, and SKU/description imports from Excel. Discounts and added tax are zero. Fractional quantities, non-cash payments, tax/discount configuration, and additional bazaar creation remain planned.
+Version 0.1 supports cash payments, whole quantities, one active bazaar, one open ticket per cashier, separate cash drawers, SKU/description imports from Excel, and multiple manager-set percentage discounts for an entire order. In **Settings → Checkout discounts**, the manager adds or deletes rates from 0.01–99% with password confirmation. At checkout, the cashier selects **No discount** or one of the saved rates. Deleting a rate clears it from open orders and requires another payment review; completed receipts retain their original discount. Reports show discounts, and refunds use the discounted amount actually paid. Added tax remains zero. Fractional quantities, non-cash payments, statutory discount/tax handling, and additional bazaar creation remain planned.
 
 Before real trading, confirm the bazaar's currency, tax treatment, receipt content, and printer layout, and test both physical PCs, the router, external backups, restore, and power interruption. The host is a single point of availability. Application audit rules do not prevent a host administrator from changing local files.
 
@@ -158,4 +164,4 @@ Before real trading, confirm the bazaar's currency, tax treatment, receipt conte
 
 ## Receipt printers on each cashier laptop
 
-For remembered USB printers and automatic printing after payment confirmation, follow [printer setup](docs/printer-setup.md). A manager performs the one-time pairing and printer selection. On the POS host, a cashier can then start an offline helper from **Connect printer** in Checkout without a Windows Administrator prompt. Automatic printing stays off until setup; browser printing remains available. Physical printer output must be verified when hardware is available.
+For remembered USB printers and automatic printing after payment confirmation, follow [printer setup](docs/printer-setup.md). A manager pairs and selects the printer in Settings, and can disconnect it there. On the POS host, a cashier can start an offline paired helper from **Connect printer** in Checkout without a Windows Administrator prompt. Automatic printing stays off until setup; browser printing remains available. Physical printer output must be verified when hardware is available.

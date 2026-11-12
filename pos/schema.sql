@@ -1,13 +1,19 @@
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS system_settings (
  system_setting_id INTEGER PRIMARY KEY CHECK(system_setting_id=1),
- instance_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+ instance_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+ discount_percent_bp INTEGER NOT NULL DEFAULT 0 CHECK(discount_percent_bp BETWEEN 0 AND 9900)
 );
 CREATE TABLE IF NOT EXISTS users (
  user_id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
  display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
- role TEXT NOT NULL CHECK(role IN ('manager','cashier')), active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+ role TEXT NOT NULL CHECK(role IN ('it_admin','manager','cashier')), active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
  created_by_user_id INTEGER REFERENCES users(user_id), created_at TEXT NOT NULL, disabled_at TEXT
+);
+CREATE TABLE IF NOT EXISTS discount_rates (
+ discount_rate_id INTEGER PRIMARY KEY,
+ percent_bp INTEGER NOT NULL UNIQUE CHECK(percent_bp BETWEEN 1 AND 9900),
+ created_by_user_id INTEGER REFERENCES users(user_id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bazaars (
  bazaar_id INTEGER PRIMARY KEY, name TEXT NOT NULL, starts_on TEXT NOT NULL, ends_on TEXT,
@@ -54,13 +60,19 @@ CREATE TABLE IF NOT EXISTS categories (
 );
 CREATE TABLE IF NOT EXISTS products (
  product_id INTEGER PRIMARY KEY, sku TEXT NOT NULL UNIQUE COLLATE NOCASE, barcode TEXT UNIQUE,
- description TEXT NOT NULL, category_id INTEGER NOT NULL REFERENCES categories(category_id), unit TEXT NOT NULL,
+ description TEXT NOT NULL, short_description TEXT NOT NULL DEFAULT '',
+ category_id INTEGER NOT NULL REFERENCES categories(category_id), unit TEXT NOT NULL,
+ unit_description TEXT NOT NULL DEFAULT '', unit_price_minor INTEGER NOT NULL CHECK(unit_price_minor>0),
  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1))
 );
 CREATE TABLE IF NOT EXISTS product_import_drafts (
  product_import_draft_id INTEGER PRIMARY KEY, sku TEXT NOT NULL UNIQUE COLLATE NOCASE,
  description TEXT NOT NULL, source_filename TEXT NOT NULL,
- imported_by_user_id INTEGER NOT NULL REFERENCES users(user_id), imported_at TEXT NOT NULL
+ imported_by_user_id INTEGER NOT NULL REFERENCES users(user_id), imported_at TEXT NOT NULL,
+ barcode TEXT, short_description TEXT NOT NULL DEFAULT '', unit TEXT NOT NULL DEFAULT '',
+ unit_description TEXT NOT NULL DEFAULT '', category_name TEXT NOT NULL DEFAULT '',
+ amount_minor INTEGER CHECK(amount_minor>0), unit_price_minor INTEGER CHECK(unit_price_minor>0), source_row INTEGER,
+ import_issue TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS product_images (
  product_image_id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(product_id),
@@ -84,6 +96,9 @@ CREATE TABLE IF NOT EXISTS stock_documents (
  status TEXT NOT NULL CHECK(status='posted'), created_by_user_id INTEGER NOT NULL REFERENCES users(user_id),
  approved_by_user_id INTEGER NOT NULL REFERENCES users(user_id), created_at TEXT NOT NULL, approved_at TEXT NOT NULL
 );
+CREATE TRIGGER IF NOT EXISTS stock_documents_receipts_only BEFORE INSERT ON stock_documents
+WHEN NEW.document_type NOT IN ('opening','in')
+BEGIN SELECT RAISE(ABORT,'Only opening stock and receipts can be posted'); END;
 CREATE TABLE IF NOT EXISTS stock_document_lines (
  stock_document_line_id INTEGER PRIMARY KEY, stock_document_id INTEGER NOT NULL REFERENCES stock_documents(stock_document_id),
  product_id INTEGER NOT NULL REFERENCES products(product_id), quantity_change INTEGER NOT NULL,
@@ -93,6 +108,8 @@ CREATE TABLE IF NOT EXISTS purchase_tickets (
  purchase_ticket_id INTEGER PRIMARY KEY, bazaar_day_id INTEGER NOT NULL REFERENCES bazaar_days(bazaar_day_id),
  ticket_number TEXT NOT NULL, owner_user_id INTEGER NOT NULL REFERENCES users(user_id), terminal_id INTEGER NOT NULL REFERENCES terminals(terminal_id),
  state TEXT NOT NULL CHECK(state IN ('open','completed','cancelled')), version INTEGER NOT NULL DEFAULT 0,
+ discount_selected INTEGER NOT NULL DEFAULT 0 CHECK(discount_selected IN (0,1)),
+ discount_percent_bp INTEGER NOT NULL DEFAULT 0 CHECK(discount_percent_bp BETWEEN 0 AND 9900),
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(bazaar_day_id,ticket_number)
 );
 CREATE TABLE IF NOT EXISTS ticket_lines (
@@ -106,6 +123,7 @@ CREATE TABLE IF NOT EXISTS sales (
  shift_id INTEGER NOT NULL REFERENCES shifts(shift_id), cashier_user_id INTEGER NOT NULL REFERENCES users(user_id),
  terminal_id INTEGER NOT NULL REFERENCES terminals(terminal_id), subtotal_minor INTEGER NOT NULL CHECK(subtotal_minor>0),
  discount_minor INTEGER NOT NULL DEFAULT 0 CHECK(discount_minor>=0), tax_minor INTEGER NOT NULL DEFAULT 0 CHECK(tax_minor>=0),
+ discount_percent_bp INTEGER NOT NULL DEFAULT 0 CHECK(discount_percent_bp BETWEEN 0 AND 9900),
  total_minor INTEGER NOT NULL CHECK(total_minor=subtotal_minor-discount_minor+tax_minor), completed_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS checkout_requests (
@@ -116,7 +134,8 @@ CREATE TABLE IF NOT EXISTS checkout_requests (
 CREATE TABLE IF NOT EXISTS sale_lines (
  sale_line_id INTEGER PRIMARY KEY, sale_id INTEGER NOT NULL REFERENCES sales(sale_id), product_id INTEGER NOT NULL REFERENCES products(product_id),
  price_id INTEGER NOT NULL REFERENCES product_prices(price_id), product_image_id INTEGER REFERENCES product_images(product_image_id),
- sku_snapshot TEXT NOT NULL, description_snapshot TEXT NOT NULL, category_id_snapshot INTEGER NOT NULL REFERENCES categories(category_id),
+ sku_snapshot TEXT NOT NULL, description_snapshot TEXT NOT NULL,
+ short_description_snapshot TEXT NOT NULL DEFAULT '', category_id_snapshot INTEGER NOT NULL REFERENCES categories(category_id),
  category_name_snapshot TEXT NOT NULL, unit_snapshot TEXT NOT NULL, quantity INTEGER NOT NULL CHECK(quantity>0),
  unit_price_minor INTEGER NOT NULL CHECK(unit_price_minor>0), discount_minor INTEGER NOT NULL DEFAULT 0,
  tax_minor INTEGER NOT NULL DEFAULT 0, line_total_minor INTEGER NOT NULL CHECK(line_total_minor=quantity*unit_price_minor-discount_minor+tax_minor)
@@ -167,6 +186,12 @@ CREATE TABLE IF NOT EXISTS backup_runs (
 CREATE TRIGGER IF NOT EXISTS product_balance AFTER INSERT ON products BEGIN
  INSERT INTO stock_balances(product_id,quantity_on_hand,updated_at) VALUES(NEW.product_id,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 END;
+CREATE TRIGGER IF NOT EXISTS product_unit_price_required BEFORE INSERT ON products
+WHEN NEW.unit_price_minor IS NULL OR NEW.unit_price_minor<=0
+BEGIN SELECT RAISE(ABORT,'Unit price is required'); END;
+CREATE TRIGGER IF NOT EXISTS product_unit_price_locked BEFORE UPDATE OF unit_price_minor ON products
+WHEN NEW.unit_price_minor IS NOT OLD.unit_price_minor
+BEGIN SELECT RAISE(ABORT,'Unit price is locked'); END;
 CREATE TRIGGER IF NOT EXISTS movement_balance AFTER INSERT ON stock_movements BEGIN
  UPDATE stock_balances SET quantity_on_hand=quantity_on_hand+NEW.quantity_change,updated_at=NEW.created_at WHERE product_id=NEW.product_id;
 END;
@@ -211,4 +236,4 @@ CREATE TABLE IF NOT EXISTS receipt_print_jobs (
  created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT, error_message TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_automatic_print_per_sale ON receipt_print_jobs(sale_id) WHERE job_kind='automatic';
-PRAGMA user_version=3;
+PRAGMA user_version=9;

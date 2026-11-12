@@ -28,15 +28,80 @@ def initialize(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
         schema_version = db.execute('PRAGMA user_version').fetchone()[0]
-        if schema_version not in (0, 1, 2, 3):
+        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
             raise RuntimeError('Unsupported database version. Restore the matching application.')
         db.execute('PRAGMA journal_mode=WAL')
         if schema_version == 1:
             db.execute("ALTER TABLE receipt_printers ADD COLUMN paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter'))")
             db.execute("ALTER TABLE receipt_print_jobs ADD COLUMN paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter'))")
+        if schema_version in (1, 2, 3, 4):
+            for table, column, definition in (
+                ('system_settings', 'discount_percent_bp', 'INTEGER NOT NULL DEFAULT 0 CHECK(discount_percent_bp BETWEEN 0 AND 9900)'),
+                ('purchase_tickets', 'discount_selected', 'INTEGER NOT NULL DEFAULT 0 CHECK(discount_selected IN (0,1))'),
+                ('sales', 'discount_percent_bp', 'INTEGER NOT NULL DEFAULT 0 CHECK(discount_percent_bp BETWEEN 0 AND 9900)'),
+                ('purchase_tickets', 'discount_percent_bp', 'INTEGER NOT NULL DEFAULT 0 CHECK(discount_percent_bp BETWEEN 0 AND 9900)'),
+            ):
+                if column not in {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}:
+                    db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+        if schema_version in (1, 2, 3, 4, 5):
+            for table, column, definition in (
+                ('products', 'short_description', "TEXT NOT NULL DEFAULT ''"),
+                ('products', 'unit_description', "TEXT NOT NULL DEFAULT ''"),
+                ('product_import_drafts', 'barcode', 'TEXT'),
+                ('product_import_drafts', 'short_description', "TEXT NOT NULL DEFAULT ''"),
+                ('product_import_drafts', 'unit', "TEXT NOT NULL DEFAULT ''"),
+                ('product_import_drafts', 'unit_description', "TEXT NOT NULL DEFAULT ''"),
+                ('product_import_drafts', 'category_name', "TEXT NOT NULL DEFAULT ''"),
+                ('product_import_drafts', 'amount_minor', 'INTEGER CHECK(amount_minor>0)'),
+                ('product_import_drafts', 'source_row', 'INTEGER'),
+                ('product_import_drafts', 'import_issue', "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}:
+                    db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+        if schema_version in (1, 2, 3, 4, 5, 6):
+            for table in ('products', 'product_import_drafts'):
+                if 'unit_price_minor' not in {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}:
+                    db.execute(f'ALTER TABLE {table} ADD COLUMN unit_price_minor INTEGER CHECK(unit_price_minor>0)')
+            db.execute('''UPDATE products SET unit_price_minor=(
+                SELECT amount_minor FROM product_prices WHERE product_id=products.product_id
+                ORDER BY price_id DESC LIMIT 1) WHERE unit_price_minor IS NULL''')
+            if db.execute('SELECT 1 FROM products WHERE unit_price_minor IS NULL LIMIT 1').fetchone():
+                raise RuntimeError('A product has no current price. Set its price before upgrading the database.')
+            db.execute('''UPDATE product_import_drafts SET unit_price_minor=amount_minor
+                WHERE unit_price_minor IS NULL AND amount_minor IS NOT NULL''')
+        if schema_version in (1, 2, 3, 4, 5, 6, 7):
+            if 'short_description_snapshot' not in {row['name'] for row in db.execute('PRAGMA table_info(sale_lines)')}:
+                db.execute("ALTER TABLE sale_lines ADD COLUMN short_description_snapshot TEXT NOT NULL DEFAULT ''")
+        if 1 <= schema_version <= 8:
+            # SQLite cannot widen a CHECK constraint in place. Preserve user IDs so
+            # every existing sale, session, shift, and audit reference remains valid.
+            db.execute('PRAGMA foreign_keys=OFF')
+            try:
+                with transaction(db):
+                    db.execute('''CREATE TABLE users_new (
+                        user_id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                        display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
+                        role TEXT NOT NULL CHECK(role IN ('it_admin','manager','cashier')),
+                        active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+                        created_by_user_id INTEGER REFERENCES users(user_id), created_at TEXT NOT NULL,
+                        disabled_at TEXT)''')
+                    db.execute('''INSERT INTO users_new
+                        (user_id,username,display_name,password_hash,role,active,created_by_user_id,created_at,disabled_at)
+                        SELECT user_id,username,display_name,password_hash,
+                            CASE WHEN username='ginflorita' COLLATE NOCASE THEN 'it_admin' ELSE role END,
+                            active,created_by_user_id,created_at,disabled_at FROM users''')
+                    db.execute('DROP TABLE users')
+                    db.execute('ALTER TABLE users_new RENAME TO users')
+            finally:
+                db.execute('PRAGMA foreign_keys=ON')
         db.executescript(Path(__file__).with_name('schema.sql').read_text(encoding='utf-8'))
         db.execute('INSERT OR IGNORE INTO system_settings(system_setting_id,instance_key,created_at) VALUES(1,?,?)',
                    (secrets.token_hex(24),now()))
+        if schema_version in (1, 2, 3, 4):
+            old_rate = db.execute('SELECT discount_percent_bp FROM system_settings WHERE system_setting_id=1').fetchone()[0]
+            if old_rate:
+                db.execute('INSERT OR IGNORE INTO discount_rates(percent_bp,created_at) VALUES(?,?)', (old_rate,now()))
+                db.execute("UPDATE purchase_tickets SET discount_percent_bp=? WHERE state='open' AND discount_selected=1", (old_rate,))
         immutable = ('sales', 'sale_lines', 'payments', 'stock_movements', 'product_prices',
                      'sale_corrections', 'correction_lines', 'audit_events', 'receipt_events',
                      'stock_documents', 'stock_document_lines', 'checkout_requests')

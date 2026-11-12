@@ -7,14 +7,17 @@ import shutil
 import uuid
 import threading
 import unittest
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook, load_workbook
 from PIL import Image
 
 from pos.app import create_app
-from pos.db import connect
+from pos.db import connect, initialize
+from pos.printing import receipt_image, receipt_item_name
 
 PASSWORD='Counter-test-password-42'
 
@@ -108,6 +111,52 @@ class POSTest(unittest.TestCase):
         self.assertEqual(receipt['sale']['receipt_number'],'SQI-001-000001')
         self.assertEqual(receipt['payment']['change_minor'],7450)
 
+    def test_inventory_balances_filters_and_posting_dates(self):
+        other_category=self.call('/categories',{'name':'Other'}).json['category_id']
+        other_product=self.call('/products',{'sku':'OTHER-01','description':'Other item','category_id':other_category,'unit':'pc','amount_minor':5000,'active':True}).json['product_id']
+        self.call('/stock',{'document_type':'opening','request_key':'other-opening-stock','manager_password':PASSWORD,
+            'lines':[{'product_id':other_product,'quantity':3}]})
+        self.call('/stock',{'document_type':'in','request_key':'receipt-stock-0001','reference_no':'DEL-1',
+            'manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':4}]})
+        self.call('/checkout',self.checkout_body(self.ticket(2),tendered=30000))
+        report=self.client.get('/api/inventory').json
+        self.assertEqual({key:report['summary'][key] for key in ('products','opening','added','sold','restocked','closing')},
+                         {'products':2,'opening':0,'added':17,'sold':2,'restocked':0,'closing':15})
+        self.assertEqual(report['movement_total'],4)
+        self.assertEqual(report['movements'][0]['movement_type'],'sale')
+        self.assertEqual(report['movements'][0]['quantity_change'],-2)
+        self.assertEqual(next(p for p in report['products'] if p['product_id']==self.product)['closing'],12)
+        filtered=self.client.get(f'/api/inventory?category_id={other_category}').json
+        self.assertEqual(filtered['summary']['closing'],3)
+        self.assertEqual(filtered['product_total'],1)
+        self.assertEqual(filtered['movement_total'],1)
+        searched=self.client.get('/api/inventory?q=TEST-01').json
+        self.assertEqual(searched['product_total'],1)
+        self.assertEqual(searched['summary']['sold'],2)
+        future=(datetime.now(ZoneInfo('Asia/Manila')).date()+timedelta(days=1)).isoformat()
+        future_report=self.client.get('/api/inventory?from='+future).json
+        self.assertEqual(future_report['summary']['opening'],15)
+        self.assertEqual(future_report['summary']['closing'],15)
+        self.assertEqual(future_report['summary']['added'],0)
+        self.assertEqual(future_report['movement_total'],0)
+        self.assertEqual(self.client.get('/api/inventory?from=2026-02-31').status_code,400)
+        self.assertEqual(self.client.get('/api/inventory?from=2026-11-12&to=2026-11-11').status_code,400)
+        second,_,_=self.second_cashier()
+        self.assertEqual(second.get('/api/inventory').status_code,403)
+
+    def test_inventory_movement_pages_do_not_repeat_records(self):
+        for index in range(16):
+            self.call('/stock',{'document_type':'in','request_key':f'paged-stock-receipt-{index:02d}',
+                'manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':1}]})
+        first=self.client.get('/api/inventory?movement_page=1').json
+        second=self.client.get('/api/inventory?movement_page=2').json
+        self.assertEqual(first['movement_total'],17)
+        self.assertEqual(len(first['movements']),15)
+        self.assertEqual(len(second['movements']),2)
+        self.assertTrue({m['stock_movement_id'] for m in first['movements']}.isdisjoint(
+            {m['stock_movement_id'] for m in second['movements']}))
+        self.assertEqual(self.client.get('/api/inventory?movement_page=999').json['movement_page'],2)
+
     def test_concurrent_duplicate_requests(self):
         body=self.checkout_body(self.ticket())
         cookies={name:self.client.get_cookie(name).value for name in self.app.config['POS_COOKIE_NAMES']}
@@ -122,7 +171,8 @@ class POSTest(unittest.TestCase):
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),1)
 
     def test_last_unit_only_one_cashier_succeeds(self):
-        self.call('/stock',{'document_type':'count','request_key':'stock-count-request-01','reference_no':'COUNT','reason':'One remains','manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':1}]})
+        self.product=self.call('/products',{'sku':'LAST-01','description':'Last unit','category_id':self.category,'unit':'pc','amount_minor':12550,'active':True}).json['product_id']
+        self.call('/stock',{'document_type':'opening','request_key':'last-unit-opening-01','manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':1}]})
         second,csrf,_=self.second_cashier()
         a=self.checkout_body(self.ticket(),key='cashier-one-checkout')
         b=self.checkout_body(self.ticket(client=second,csrf=csrf),key='cashier-two-checkout')
@@ -132,7 +182,7 @@ class POSTest(unittest.TestCase):
             return self.call('/checkout',body,client=c,csrf=token,expected=None).status_code
         with ThreadPoolExecutor(2) as pool:statuses=list(pool.map(submit,[(self.client,self.csrf,a),(second,csrf,b)]))
         self.assertEqual(sorted(statuses),[200,409])
-        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),0)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances WHERE product_id='+str(self.product)),0)
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),1)
 
     def test_changed_payload_cannot_reuse_key(self):
@@ -152,6 +202,46 @@ class POSTest(unittest.TestCase):
         receipt=self.client.get('/api/sales/'+str(sid)).json
         self.assertEqual(receipt['lines'][0]['description_snapshot'],'New label')
         self.assertEqual(receipt['lines'][0]['unit_price_minor'],14000)
+
+    def test_receipt_uses_short_description_saved_at_sale(self):
+        product={'sku':'TEST-01','barcode':'12345678','description':'Long catalog description',
+                 'short_description':'Short receipt name','category_id':self.category,
+                 'unit':'pc','amount_minor':12550,'active':True}
+        self.call('/products/'+str(self.product),product,'PUT')
+        sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
+        self.call('/products/'+str(self.product),{**product,'short_description':'Changed later'},'PUT')
+        line=self.client.get('/api/sales/'+str(sid)).json['lines'][0]
+        self.assertEqual(line['description_snapshot'],'Long catalog description')
+        self.assertEqual(line['short_description_snapshot'],'Short receipt name')
+        self.assertEqual(receipt_item_name(line),'Short receipt name')
+        self.assertEqual(receipt_item_name({'short_description_snapshot':'',
+                                            'description_snapshot':'Older receipt name'}),'Older receipt name')
+
+    def test_unit_price_is_locked_while_selling_price_controls_checkout(self):
+        data={'sku':'DUAL-PRICE','description':'Two prices','category_id':self.category,'unit':'pc',
+              'unit_price_minor':5000,'selling_price_minor':6500,'quantity':3,
+              'request_key':'dual-price-opening-0001','active':True}
+        pid=self.call('/products',data).json['product_id']
+        product=next(p for p in self.client.get('/api/catalog').json['products'] if p['product_id']==pid)
+        self.assertEqual((product['unit_price_minor'],product['selling_price_minor']),(5000,6500))
+        ticket=self.call('/tickets',{}).json
+        ticket=self.call('/tickets/'+str(ticket['purchase_ticket_id']),
+                         {'version':ticket['version'],'lines':[{'product_id':pid,'quantity':1}]},'PUT').json
+        self.assertEqual(ticket['total_minor'],6500)
+        self.call('/products/'+str(pid),{**data,'selling_price_minor':7200,'reason':'Retail adjustment'},'PUT')
+        updated=self.client.get('/api/tickets/'+str(ticket['purchase_ticket_id'])).json
+        self.assertEqual(updated['total_minor'],7200)
+        self.call('/products/'+str(pid),{**data,'unit_price_minor':5500,
+            'selling_price_minor':7200,'reason':'Attempted base price change'},'PUT',expected=409)
+        connection=connect(self.database)
+        try:
+            self.assertEqual(connection.execute('SELECT unit_price_minor FROM products WHERE product_id=?',
+                                                (pid,)).fetchone()[0],5000)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM product_prices WHERE product_id=?',
+                                                (pid,)).fetchone()[0],2)
+            with self.assertRaisesRegex(sqlite3.IntegrityError,'Unit price is locked'):
+                connection.execute('UPDATE products SET unit_price_minor=5500 WHERE product_id=?',(pid,))
+        finally:connection.close()
 
     def test_manager_creates_and_edits_catalog_without_reason_or_password(self):
         data={'sku':'TEST-02','description':'New item','category_id':self.category,'unit':'pc','amount_minor':8500,'active':True}
@@ -207,6 +297,20 @@ class POSTest(unittest.TestCase):
         self.assertIn('ITEM CODE and DESCRIPTION',response.json['error'])
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_import_drafts'),0)
 
+    def test_product_keeps_distinct_long_short_and_unit_descriptions(self):
+        data={'sku':'PAINT-01','barcode':'0001234567890','description':'Acrylic paint 100 mL bottle in blue',
+              'short_description':'Blue acrylic paint','category_id':self.category,'unit':'BTL',
+              'unit_description':'bottle','amount_minor':6500,'active':True}
+        product_id=self.call('/products',data).json['product_id']
+        product=next(p for p in self.client.get('/api/catalog').json['products'] if p['product_id']==product_id)
+        for key in ('sku','barcode','description','short_description','unit','unit_description'):
+            self.assertEqual(product[key],data[key])
+        self.call('/products/'+str(product_id),{**data,'short_description':'Paint blue',
+            'unit_description':'100 mL bottle'},'PUT')
+        self.assertEqual(self.scalar("SELECT short_description FROM products WHERE sku='PAINT-01'"),'Paint blue')
+        self.assertEqual(self.scalar("SELECT unit_description FROM products WHERE sku='PAINT-01'"),'100 mL bottle')
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM product_prices'),2)
+
     def test_only_existing_price_changes_require_a_reason(self):
         data={'sku':'TEST-01','barcode':'12345678','description':'Should roll back','category_id':self.category,'unit':'pc','amount_minor':15000,'active':True}
         self.call('/products/'+str(self.product),data,'PUT',expected=400)
@@ -239,6 +343,57 @@ class POSTest(unittest.TestCase):
         self.call('/users',{'username':'newuser','display_name':'New user','role':'cashier','active':True,'password':PASSWORD},expected=403)
         self.call('/stock',{'document_type':'in','request_key':'missing-approval-001','reference_no':'IN','reason':'Delivery','lines':[{'product_id':self.product,'quantity':2}]},expected=403)
         self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),10)
+
+    def test_it_admin_keeps_manager_access_and_only_self_can_update(self):
+        admin_db=self.folder/'admin.sqlite3'
+        admin_app=create_app(admin_db,self.folder/'admin-backups',testing=True)
+        admin=admin_app.test_client();admin_csrf=admin.get('/api/state').json['csrf']
+        self.call('/setup',{'username':'ginflorita','password':PASSWORD,'display_name':'IT Owner',
+            'bazaar_name':'Admin Test','timezone':'Asia/Manila','currency_code':'PHP'},client=admin,csrf=admin_csrf)
+        account=admin.get('/api/state').json['user']
+        self.assertEqual(account['role'],'it_admin')
+        self.assertEqual(admin.get('/api/team').status_code,200)
+        manager_id=self.call('/users',{'username':'manager2','display_name':'Other manager','role':'manager',
+            'active':True,'password':PASSWORD,'manager_password':PASSWORD},client=admin,csrf=admin_csrf).json['user_id']
+        other=admin_app.test_client();other_csrf=other.get('/api/state').json['csrf']
+        self.call('/login',{'username':'manager2','password':PASSWORD},client=other,csrf=other_csrf)
+        update={'display_name':'Changed by other manager','role':'it_admin','active':True,
+            'password':'','manager_password':PASSWORD}
+        self.call('/users/'+str(account['user_id']),update,'PUT',other,other_csrf,expected=403)
+        self.call('/users/'+str(account['user_id']),{**update,'role':'manager'},'PUT',admin,admin_csrf,expected=403)
+        self.call('/users/'+str(account['user_id']),{**update,'active':False},'PUT',admin,admin_csrf,expected=403)
+        self.call('/users',{'username':'another-admin','display_name':'Another admin','role':'it_admin',
+            'active':True,'password':PASSWORD,'manager_password':PASSWORD},client=admin,csrf=admin_csrf,expected=403)
+        self.call('/users/'+str(account['user_id']),{**update,'display_name':'Updated by ginflorita'},
+            'PUT',admin,admin_csrf)
+        connection=connect(admin_db)
+        try:
+            saved=connection.execute('SELECT display_name,role,active FROM users WHERE user_id=?',
+                (account['user_id'],)).fetchone()
+            self.assertEqual(tuple(saved),('Updated by ginflorita','it_admin',1))
+            self.assertEqual(connection.execute('SELECT role FROM users WHERE user_id=?',(manager_id,)).fetchone()[0],'manager')
+        finally:connection.close()
+
+    def test_existing_ginflorita_account_upgrades_without_losing_user_ids(self):
+        legacy_db=self.folder/'legacy.sqlite3'
+        legacy_schema=Path(__file__).resolve().parent.parent.joinpath('pos','schema.sql').read_text(encoding='utf-8')
+        legacy_schema=legacy_schema.replace("role IN ('it_admin','manager','cashier')",
+            "role IN ('manager','cashier')").replace('PRAGMA user_version=9;','PRAGMA user_version=8;')
+        connection=sqlite3.connect(legacy_db)
+        try:
+            connection.executescript(legacy_schema)
+            connection.execute("INSERT INTO users(user_id,username,display_name,password_hash,role,created_at) VALUES(1,'ginflorita','IT Owner','hash','manager','2026-01-01')")
+            connection.execute("INSERT INTO users(user_id,username,display_name,password_hash,role,created_by_user_id,created_at) VALUES(2,'cashier1','Cashier','hash','cashier',1,'2026-01-01')")
+            connection.commit()
+        finally:connection.close()
+        initialize(legacy_db)
+        connection=connect(legacy_db)
+        try:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],9)
+            self.assertEqual([tuple(row) for row in connection.execute('SELECT user_id,role FROM users ORDER BY user_id')],[(1,'it_admin'),(2,'cashier')])
+            self.assertEqual(connection.execute('SELECT created_by_user_id FROM users WHERE user_id=2').fetchone()[0],1)
+            self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(),[])
+        finally:connection.close()
 
     def test_cashier_roles_receipt_scope_and_csrf(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
@@ -297,14 +452,143 @@ class POSTest(unittest.TestCase):
         self.call('/stock',{**data,'request_key':'stock-optional-reason-02','reason':'Supplier delivery'})
         self.assertEqual(self.scalar('SELECT reason FROM stock_documents ORDER BY stock_document_id DESC LIMIT 1'),'Supplier delivery')
 
-    def test_stock_removals_counts_and_adjustments_still_need_reason(self):
+    def test_bulk_stock_posts_all_items_once_or_rolls_back_together(self):
+        second=self.call('/products',{'sku':'TEST-02','description':'Second product','category_id':self.category,
+            'unit':'pc','amount_minor':5000,'active':True}).json['product_id']
+        catalog={p['product_id']:p for p in self.client.get('/api/catalog').json['products']}
+        self.assertEqual(catalog[self.product]['has_stock_history'],1)
+        self.assertEqual(catalog[second]['has_stock_history'],0)
+        body={'document_type':'in','request_key':'bulk-stock-receipt-0001','reference_no':'DELIVERY-1',
+            'manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':3},
+                {'product_id':second,'quantity':7}]}
+        result=self.call('/stock',body).json
+        self.assertEqual(result,self.call('/stock',body).json)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM stock_documents'),2)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM stock_document_lines'),3)
+        db=connect(self.database)
+        try:
+            balances=dict(db.execute('SELECT product_id,quantity_on_hand FROM stock_balances'))
+            self.assertEqual(balances[self.product],13)
+            self.assertEqual(balances[second],7)
+        finally:db.close()
+        self.call('/stock',{**body,'request_key':'bulk-stock-invalid-0002',
+            'lines':[{'product_id':self.product,'quantity':5},{'product_id':999999,'quantity':1}]},expected=404)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM stock_documents'),2)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances WHERE product_id=1'),13)
+
+    def test_manual_stock_removals_and_resets_are_blocked(self):
         for kind in ('out','count','adjustment'):
             with self.subTest(kind=kind):
-                data={'document_type':kind,'request_key':'stock-reason-required-'+kind,'manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':1}]}
+                data={'document_type':kind,'request_key':'stock-disabled-'+kind,'manager_password':PASSWORD,'reason':'Manual change','lines':[{'product_id':self.product,'quantity':1}]}
                 self.call('/stock',data,expected=400)
-                self.call('/stock',{**data,'reason':'   '},expected=400)
+        db=connect(self.database)
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("""INSERT INTO stock_documents(bazaar_id,bazaar_day_id,document_type,reference_no,reason,request_key,status,created_by_user_id,approved_by_user_id,created_at,approved_at)
+                    VALUES(1,1,'count','','Manual change','direct-count-disabled','posted',1,1,'2026-10-19','2026-10-19')""")
+        finally:db.close()
         self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),10)
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM stock_documents'),1)
+
+    def test_stock_receipts_require_positive_quantity(self):
+        for quantity in (0,-1):
+            with self.subTest(quantity=quantity):
+                self.call('/stock',{'document_type':'in','request_key':'invalid-receipt-'+str(quantity),'manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':quantity}]},expected=400)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),10)
+
+    def test_cashier_selects_manager_discount_and_refunds_paid_amount(self):
+        rate_id=self.call('/discount',{'discount_percent_bp':1250,'manager_password':PASSWORD}).json['discount_rate_id']
+        cashier,csrf,_=self.second_cashier()
+        ticket=self.ticket(quantity=3,client=cashier,csrf=csrf)
+        quote=self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
+                        {'version':ticket['version'],'discount_percent_bp':1250},'PUT',cashier,csrf).json
+        self.assertEqual(quote['subtotal_minor'],37650)
+        self.assertEqual(quote['discount_minor'],4706)
+        self.assertEqual(quote['total_minor'],32944)
+        sale_id=self.call('/checkout',self.checkout_body(quote,tendered=33000),client=cashier,csrf=csrf).json['sale_id']
+        sale=self.client.get('/api/sales/'+str(sale_id)).json
+        self.assertEqual(sale['sale']['discount_percent_bp'],1250)
+        self.assertEqual(sale['sale']['total_minor'],32944)
+        self.assertEqual(sale['payment']['change_minor'],56)
+        self.call('/discount/'+str(rate_id),{'manager_password':PASSWORD},'DELETE')
+        self.assertEqual(self.client.get('/api/sales/'+str(sale_id)).json['sale']['discount_percent_bp'],1250)
+        line=sale['lines'][0]
+        self.assertEqual(line['discount_minor'],4706)
+        self.assertEqual(line['line_total_minor'],32944)
+        connection=connect(self.database)
+        try:
+            with Image.open(io.BytesIO(receipt_image(connection,sale_id,'roll_80'))) as artwork:
+                self.assertGreater(artwork.height,300)
+        finally:connection.close()
+        report=self.client.get('/api/reports').json['summary']
+        self.assertEqual(report['gross_minor'],37650)
+        self.assertEqual(report['discount_minor'],4706)
+        self.assertEqual(report['sales_minor'],32944)
+        export=self.client.get('/api/reports?format=xlsx')
+        self.assertEqual(export.status_code,200)
+        workbook=load_workbook(io.BytesIO(export.data),read_only=True,data_only=True)
+        try:
+            self.assertEqual(workbook['Summary']['B11'].value,47.06)
+            self.assertEqual(workbook['Days']['H8'].value,47.06)
+        finally:workbook.close()
+        for number,expected_refund in ((1,10981),(2,10981),(3,10982)):
+            result=self.call('/sales/'+str(sale_id)+'/corrections',
+                {'request_key':f'discount-refund-{number:02d}-0001','correction_type':'return',
+                 'reason':'Customer return','manager_password':PASSWORD,
+                 'lines':[{'sale_line_id':line['sale_line_id'],'quantity':1,'restock_quantity':1}]}).json
+            self.assertEqual(result['refund_minor'],expected_refund)
+        self.assertEqual(self.scalar('SELECT SUM(refund_minor) FROM correction_lines'),32944)
+        self.assertEqual(self.client.get('/api/reports').json['summary']['net_minor'],0)
+
+    def test_discount_changes_invalidate_open_quotes_and_require_manager(self):
+        cashier,csrf,_=self.second_cashier()
+        first=self.call('/discount',{'discount_percent_bp':1000,'manager_password':PASSWORD}).json['discount_rate_id']
+        second=self.call('/discount',{'discount_percent_bp':2000,'manager_password':PASSWORD}).json['discount_rate_id']
+        self.assertEqual([rate['percent_bp'] for rate in self.client.get('/api/discount').json['rates']],[1000,2000])
+        self.call('/discount',{'discount_percent_bp':1000,'manager_password':PASSWORD},expected=409)
+        ticket=self.ticket(client=cashier,csrf=csrf)
+        quote=self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
+                        {'version':ticket['version'],'discount_percent_bp':1000},'PUT',cashier,csrf).json
+        self.assertEqual(quote['total_minor'],11295)
+        self.call('/discount',{'discount_percent_bp':3000,'manager_password':PASSWORD},client=cashier,csrf=csrf,expected=403)
+        self.call('/discount',{'discount_percent_bp':3000},expected=403)
+        self.call('/discount/'+str(first),{'manager_password':PASSWORD},'DELETE',cashier,csrf,expected=403)
+        self.call('/discount/'+str(first),{},'DELETE',expected=403)
+        self.call('/discount/'+str(first),{'manager_password':PASSWORD},'DELETE')
+        self.call('/checkout',self.checkout_body(quote),client=cashier,csrf=csrf,expected=409)
+        refreshed=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET',client=cashier,csrf=csrf).json
+        self.assertEqual(refreshed['total_minor'],12550)
+        self.assertEqual(refreshed['discount_percent_bp'],0)
+        self.assertNotEqual(refreshed['quote_hash'],quote['quote_hash'])
+        selected=self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
+                           {'version':refreshed['version'],'discount_percent_bp':2000},'PUT',cashier,csrf).json
+        self.assertEqual(selected['total_minor'],10040)
+        self.call('/discount/'+str(second),{'manager_password':PASSWORD},'DELETE')
+        disabled=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET',client=cashier,csrf=csrf).json
+        self.assertEqual(disabled['discount_selected'],0)
+        self.assertEqual(disabled['total_minor'],12550)
+        self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
+                  {'version':disabled['version'],'discount_percent_bp':2000},'PUT',cashier,csrf,expected=409)
+        self.assertEqual(self.client.get('/api/discount').json['rates'],[])
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),0)
+
+    def test_existing_single_discount_migrates_with_open_ticket(self):
+        ticket=self.ticket()
+        connection=connect(self.database)
+        try:
+            connection.execute('DROP TABLE discount_rates')
+            connection.execute('ALTER TABLE purchase_tickets DROP COLUMN discount_percent_bp')
+            connection.execute('UPDATE system_settings SET discount_percent_bp=1500 WHERE system_setting_id=1')
+            connection.execute('UPDATE purchase_tickets SET discount_selected=1 WHERE purchase_ticket_id=?',
+                               (ticket['purchase_ticket_id'],))
+            connection.execute('PRAGMA user_version=4')
+        finally:connection.close()
+        initialize(self.database)
+        self.assertEqual(self.scalar('PRAGMA user_version'),9)
+        self.assertEqual([r['percent_bp'] for r in self.client.get('/api/discount').json['rates']],[1500])
+        restored=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET').json
+        self.assertEqual(restored['discount_percent_bp'],1500)
+        self.assertEqual(restored['total_minor'],10667)
 
     def test_day_two_refund_does_not_rewrite_day_one(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
@@ -415,6 +699,57 @@ class POSTest(unittest.TestCase):
         self.call('/receipt-printer/pair',{})
         self.assertEqual(poll().status_code,403)  # Re-pair revokes the old token.
 
+    def test_disconnect_printer_revokes_pairing_and_cancels_waiting_receipt(self):
+        token=self.call('/receipt-printer/pair',{}).json['pairing_token']
+        agent=self.app.test_client()
+        def poll():
+            return agent.post('/api/print-agent/poll',json={'printers':['USB Receipt']},
+                              headers={'Authorization':'Bearer '+token})
+        self.assertEqual(poll().status_code,200)
+        self.call('/receipt-printer',{'printer_name':'USB Receipt','paper_width_mm':80,'enabled':True},'PUT')
+        self.call('/checkout',self.checkout_body(self.ticket()))
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM receipt_print_jobs WHERE status='queued'"),1)
+        second,csrf,_=self.second_cashier()
+        self.call('/receipt-printer',{},'DELETE',client=second,csrf=csrf,expected=403)
+        result=self.call('/receipt-printer',{},'DELETE').json
+        self.assertEqual(result['cancelled_jobs'],1)
+        self.assertIsNone(self.client.get('/api/receipt-printer').json['printer'])
+        self.assertEqual(poll().status_code,403)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM receipt_print_jobs WHERE status='failed'"),1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM audit_events WHERE action='printer.disconnected'"),1)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM audit_events WHERE action='receipt.print_cancelled'"),1)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),1)
+        self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
+
+    def test_disconnect_printer_waits_for_claimed_job_review(self):
+        token=self.call('/receipt-printer/pair',{}).json['pairing_token']
+        agent=self.app.test_client()
+        headers={'Authorization':'Bearer '+token}
+        agent.post('/api/print-agent/poll',json={'printers':['USB Receipt']},headers=headers)
+        self.call('/receipt-printer',{'printer_name':'USB Receipt','paper_width_mm':58,'enabled':True},'PUT')
+        self.call('/checkout',self.checkout_body(self.ticket()))
+        job=agent.post('/api/print-agent/poll',json={'printers':['USB Receipt']},headers=headers).json['job']
+        self.call('/receipt-printer',{},'DELETE',expected=409)
+        self.assertIsNotNone(self.client.get('/api/receipt-printer').json['printer'])
+        self.call('/receipt-printer/jobs/'+str(job['receipt_print_job_id'])+'/resolve',
+                  {'reason':'Checked Windows printer queue'})
+        self.assertEqual(self.call('/receipt-printer',{},'DELETE').json['cancelled_jobs'],0)
+
+    def test_printer_settings_shows_pending_job_older_than_recent_history(self):
+        sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
+        terminal_id=self.client.get('/api/state').json['terminal']['terminal_id']
+        user_id=self.client.get('/api/state').json['user']['user_id']
+        connection=connect(self.database)
+        try:
+            for status in ['queued']+['submitted']*16:
+                connection.execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,
+                    paper_width_mm,status,requested_by_user_id,created_at) VALUES(?,?,'copy','Test printer',80,?,?,?)''',
+                    (sid,terminal_id,status,user_id,'2026-10-19T00:00:00+00:00'))
+        finally:connection.close()
+        jobs=self.client.get('/api/receipt-printer').json['jobs']
+        self.assertEqual(len([j for j in jobs if j['status']=='queued']),1)
+        self.assertEqual(len([j for j in jobs if j['status']=='submitted']),15)
+
     def test_cashier_can_start_saved_print_helper_without_manager_password(self):
         token=self.call('/receipt-printer/pair',{}).json['pairing_token']
         config=self.folder/'print-helper.json'
@@ -500,6 +835,8 @@ class POSTest(unittest.TestCase):
         before=self.scalar('SELECT last_seen_at FROM auth_sessions')
         self.client.get('/api/state')
         self.assertEqual(self.scalar('SELECT last_seen_at FROM auth_sessions'),before)
+        self.assertEqual(self.client.get('/api/catalog?background=1').status_code,200)
+        self.assertEqual(self.scalar('SELECT last_seen_at FROM auth_sessions'),before)
         self.assertEqual(self.client.get('/api/state',headers={'Host':'attacker.example'}).status_code,400)
 
     def test_session_revoked_after_request_start_blocks_checkout(self):
@@ -534,6 +871,23 @@ class POSTest(unittest.TestCase):
         self.call('/checkout',self.checkout_body(ticket),client=second,csrf=csrf,expected=409)
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),0)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM audit_events WHERE action='shift.closed_by_manager'"),1)
+        event=next(a for a in self.client.get('/api/audit').json['events'] if a['action']=='shift.closed_by_manager')
+        self.assertEqual(event['subject_display_name'],'Second cashier')
+        self.assertEqual(event['reason'],data['reason'])
+
+    def test_shift_history_pages_and_open_shifts_are_separate(self):
+        for _ in range(3):
+            self.call('/shifts/close',{'counted_cash_minor':100000})
+            self.call('/shifts/open',{'opening_cash_minor':100000})
+        open_data=self.client.get('/api/shifts?status=open').json
+        first=self.client.get('/api/shifts?status=closed&page=1&page_size=2').json
+        second=self.client.get('/api/shifts?status=closed&page=2&page_size=2').json
+        self.assertEqual(open_data['total'],1)
+        self.assertEqual(len(open_data['shifts']),1)
+        self.assertEqual(first['total'],3)
+        self.assertEqual([s['shift_id'] for s in first['shifts']],[3,2])
+        self.assertEqual([s['shift_id'] for s in second['shifts']],[1])
+        self.assertEqual(self.client.get('/api/shifts?status=closed&page=0').status_code,400)
 
     def test_verified_restore_to_new_directory_keeps_live_data(self):
         token=self.call('/receipt-printer/pair',{}).json['pairing_token']

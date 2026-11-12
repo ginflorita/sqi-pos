@@ -12,7 +12,7 @@ from pos.app import create_app
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Bazaar POS local server')
+    parser = argparse.ArgumentParser(description='SQI POS local server')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--data-dir', type=Path, default=ROOT / 'data')
     parser.add_argument('--backup-dir', type=Path)
@@ -32,7 +32,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     tls = bool(args.cert)
     app = create_app(args.data_dir.resolve() / 'pos.sqlite3', args.backup_dir, secure=tls)
-    server = Server(('0.0.0.0' if args.lan else '127.0.0.1', args.port), app, numthreads=8, request_queue_size=30, timeout=30)
+    server = Server(('0.0.0.0' if args.lan else '127.0.0.1', args.port), app, numthreads=16, request_queue_size=30, timeout=15)
+    server.keep_alive_conn_limit = 0
     if tls:
         server.ssl_adapter = BuiltinSSLAdapter(str(args.cert.resolve()), str(args.key.resolve()))
     stopped = threading.Event()
@@ -44,7 +45,7 @@ def main():
     worker = threading.Thread(target=scheduled_backup, daemon=True, name='pos-backups')
     worker.start()
     scheme = 'https' if tls else 'http'
-    print(f'\nBazaar POS: {scheme}://localhost:{args.port}')
+    print(f'\nSQI POS: {scheme}://localhost:{args.port}')
     print(f'Database: {args.data_dir.resolve() / "pos.sqlite3"}')
     print('Keep this server running while either laptop is selling. Ctrl+C stops it.\n')
     try:

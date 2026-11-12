@@ -17,6 +17,10 @@ from .db import digest, now, transaction as raw_transaction
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def receipt_item_name(line):
+    return line['short_description_snapshot'].strip() or line['description_snapshot']
+
+
 def launch_print_helper(config_path):
     """Start the Windows helper without leaving a console window open."""
     log_path = config_path.parent / 'helper.log'
@@ -64,9 +68,25 @@ def receipt_image(db, sale_id, paper_size):
     def amount(n):
         return f'₱{n / 100:,.2f}'
 
+    def wrapped(text, font, maximum):
+        words = str(text).split()
+        result, current = [], ''
+        for word in words:
+            candidate = f'{current} {word}'.strip()
+            if current and font.getlength(candidate) > maximum:
+                result.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            result.append(current)
+        return result or ['']
+
     inset = 14
     right_edge = width - inset
-    image = Image.new('RGB', (width, 2400), 'white')
+    line_height = sum(len(wrapped(receipt_item_name(line), regular, width - inset * 2)) * (25 if is_58 else 28)
+                      + (40 if is_58 else 46) + (22 if line['discount_minor'] else 0) for line in lines)
+    image = Image.new('RGB', (width, max(2400, 650 + line_height)), 'white')
     draw = ImageDraw.Draw(image)
 
     def centered(text, y, font, fill='black'):
@@ -81,20 +101,6 @@ def receipt_image(db, sale_id, paper_size):
         while x < right_edge:
             draw.line((x, y, min(x + dash, right_edge), y), fill='#777', width=1)
             x += dash + gap
-
-    def wrapped(text, font, maximum):
-        words = str(text).split()
-        result, current = [], ''
-        for word in words:
-            candidate = f'{current} {word}'.strip()
-            if current and font.getlength(candidate) > maximum:
-                result.append(current)
-                current = word
-            else:
-                current = candidate
-        if current:
-            result.append(current)
-        return result or ['']
 
     logo = Image.open(ROOT / 'static' / 'sqi-logo.png').convert('RGBA')
     logo.thumbnail((150, 85) if is_58 else (190, 105))
@@ -118,15 +124,27 @@ def receipt_image(db, sale_id, paper_size):
     right('AMOUNT', y, small)
     y += 40
     for line in lines:
-        for description in wrapped(line['description_snapshot'], regular, width - inset * 2):
+        for description in wrapped(receipt_item_name(line), regular, width - inset * 2):
             draw.text((inset, y), description, font=regular, fill='black')
             y += 25 if is_58 else 28
         detail = f"{line['quantity']} x {amount(line['unit_price_minor'])}"
         draw.text((inset, y), detail, font=small, fill='black')
         right(amount(line['line_total_minor']), y, small)
+        if line['discount_minor']:
+            y += 22
+            draw.text((inset, y), 'Discount', font=small, fill='black')
+            right('-' + amount(line['discount_minor']), y, small)
         y += 40 if is_58 else 46
     rule(y)
     y += 22
+    if sale['discount_minor']:
+        draw.text((inset, y), 'Subtotal', font=regular, fill='black')
+        right(amount(sale['subtotal_minor']), y)
+        y += 32
+        rate = f"{sale['discount_percent_bp'] / 100:g}%"
+        draw.text((inset, y), f'Discount ({rate})', font=regular, fill='black')
+        right('-' + amount(sale['discount_minor']), y)
+        y += 38
     draw.text((inset, y + 4), 'TOTAL', font=regular, fill='black')
     right(amount(sale['total_minor']), y, total_font)
     y += 54
@@ -186,8 +204,18 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
         sid = request.args.get('sale_id', type=int)
         if sid is not None:
             sale_access(sid)
-        jobs = db().execute('''SELECT j.*,s.receipt_number FROM receipt_print_jobs j JOIN sales s USING(sale_id)
-            WHERE j.terminal_id=? AND (? IS NULL OR j.sale_id=?) ORDER BY receipt_print_job_id DESC LIMIT 15''', (g.terminal['terminal_id'],sid,sid)).fetchall()
+        if sid is not None:
+            jobs = db().execute('''SELECT j.*,s.receipt_number FROM receipt_print_jobs j JOIN sales s USING(sale_id)
+                WHERE j.terminal_id=? AND j.sale_id=? ORDER BY receipt_print_job_id DESC LIMIT 15''',
+                (g.terminal['terminal_id'],sid)).fetchall()
+        else:
+            pending = db().execute('''SELECT j.*,s.receipt_number FROM receipt_print_jobs j JOIN sales s USING(sale_id)
+                WHERE j.terminal_id=? AND j.status IN ('queued','claimed') ORDER BY receipt_print_job_id DESC''',
+                (g.terminal['terminal_id'],)).fetchall()
+            history = db().execute('''SELECT j.*,s.receipt_number FROM receipt_print_jobs j JOIN sales s USING(sale_id)
+                WHERE j.terminal_id=? AND j.status IN ('submitted','failed') ORDER BY receipt_print_job_id DESC LIMIT 15''',
+                (g.terminal['terminal_id'],)).fetchall()
+            jobs = [*pending, *history]
         return jsonify(printer=public_setting(row), jobs=[dict(j) for j in jobs])
 
     @app.post('/api/receipt-printer/start-helper')
@@ -197,7 +225,7 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
             local_request = ipaddress.ip_address(request.remote_addr or '').is_loopback
         except ValueError:
             local_request = False
-        require(local_request, 'Open Checkout on the POS host laptop to start its printer helper.', 409)
+        require(local_request, 'Open SQI POS on the host laptop to start its printer helper.', 409)
         require(os.name == 'nt' or app.config.get('TESTING'), 'The receipt printer helper requires Windows.', 409)
         row = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=?', (g.terminal['terminal_id'],)).fetchone()
         require(row, 'A manager must pair the print helper on this laptop first.', 409)
@@ -259,6 +287,29 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
                          (name,width,paper_size,int(data['enabled']),g.user['user_id'],now(),g.terminal['terminal_id']))
             event('printer.configured','terminals',g.terminal['terminal_id'],after={'printer_name':name,'paper_size':paper_size,'enabled':data['enabled']})
         return jsonify(ok=True)
+
+    @app.delete('/api/receipt-printer')
+    @signed_in(True)
+    def disconnect():
+        with transaction(db()):
+            row = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=?', (g.terminal['terminal_id'],)).fetchone()
+            require(row, 'No printer is paired on this laptop.', 409)
+            require(not db().execute("SELECT 1 FROM receipt_print_jobs WHERE terminal_id=? AND status='claimed' LIMIT 1",
+                                     (g.terminal['terminal_id'],)).fetchone(),
+                    'A receipt may already be printing. Review and close its pending record before disconnecting.', 409)
+            queued = db().execute("SELECT receipt_print_job_id FROM receipt_print_jobs WHERE terminal_id=? AND status='queued'",
+                                  (g.terminal['terminal_id'],)).fetchall()
+            stamp = now()
+            for job in queued:
+                db().execute("UPDATE receipt_print_jobs SET status='failed',finished_at=?,error_message=? WHERE receipt_print_job_id=?",
+                             (stamp, 'Printer disconnected before printing. Check the receipt before making another copy.', job['receipt_print_job_id']))
+                event('receipt.print_cancelled', 'receipt_print_jobs', job['receipt_print_job_id'],
+                      reason='Printer disconnected before printing')
+            db().execute('DELETE FROM receipt_printers WHERE receipt_printer_id=?', (row['receipt_printer_id'],))
+            event('printer.disconnected', 'terminals', g.terminal['terminal_id'],
+                  before={'printer_name': row['printer_name'], 'enabled': bool(row['enabled'])},
+                  after={'queued_jobs_cancelled': len(queued)})
+        return jsonify(disconnected=True, cancelled_jobs=len(queued))
 
     @app.post('/api/sales/<int:sid>/printer-copy')
     @signed_in()

@@ -10,10 +10,10 @@ $startup = [Environment]::GetFolderPath('Startup')
 if (-not $desktop -or -not $startup) { throw 'Windows Desktop or Startup folder was not found.' }
 $shell = New-Object -ComObject WScript.Shell
 
-$open = $shell.CreateShortcut((Join-Path $desktop 'SQI POS.lnk'))
+$open = $shell.CreateShortcut((Join-Path $desktop 'Start SQI POS.lnk'))
 $open.TargetPath = $launcher
 $open.WorkingDirectory = $root
-$open.Description = 'Open SQI POS on the main laptop'
+$open.Description = 'Start the HTTPS POS server for both laptops and open the main counter'
 $open.Save()
 
 $auto = $shell.CreateShortcut((Join-Path $startup 'SQI POS Server.lnk'))
@@ -24,4 +24,4 @@ $auto.WindowStyle = 7
 $auto.Description = 'Start the SQI POS server when this Windows user signs in'
 $auto.Save()
 
-Write-Output 'Created the SQI POS desktop icon and Windows sign-in startup shortcut.'
+Write-Output 'Created the Start SQI POS desktop icon and Windows sign-in startup shortcut.'

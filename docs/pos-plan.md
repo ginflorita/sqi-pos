@@ -4,7 +4,7 @@
 
 Version 0.1 implements the core workflows below. See [README](../README.md) for the available scope, [operations](operations.md) for setup, and [verification](verification.md) for tested scenarios and remaining equipment checks. The system supports two cashier users on separate Windows laptops at one active bazaar. A router creates a local network even without internet. Laptop 1 runs the application and keeps SQLite on its internal drive; Laptop 2 connects through a browser. The database file is never opened directly across the network or placed in a synced folder.
 
-Laptop 1 must remain powered on, awake, and connected. If the host, app, or local network is unavailable, checkout stops. There is no independent offline sale queue. Reports download as formatted Excel workbooks; item imports remain planned. Quantities are whole base units and payment is cash. Discounts and added tax are zero pending confirmation of the bazaar's requirements.
+Laptop 1 must remain powered on, awake, and connected. If the host, app, or local network is unavailable, checkout stops. There is no independent offline sale queue. Reports download as formatted Excel workbooks; item imports remain planned. Quantities are whole base units and payment is cash. The cashier can select one of several manager-set percentage discounts per order; added tax remains zero pending confirmation of the bazaar's requirements.
 
 ## Users and permissions
 
@@ -33,7 +33,7 @@ Each cashier opens a shift with an opening cash count. Closing records expected 
 - Product creation, normal edits, and photo uploads require a signed-in manager without repeated password confirmation. The audit records the actor, time, and changed details automatically; routine edits do not require a manual reason.
 - Price changes create history rows. A new product's initial price receives the automatic reason `Initial selling price`; changing an existing price requires a manager-entered reason. Every sale line stores the SKU, description, category, unit, and price used at checkout, so later catalog changes do not alter old reports or receipts.
 - A manager uploads or replaces a product photo. The app validates the file, strips unnecessary metadata, resizes/compresses it, and creates a thumbnail. The current and superseded image versions remain linked to the product and are included in database backups. A missing photo displays a placeholder and does not block a sale.
-- Stock on hand is maintained from an append-only movement ledger. Stock documents record user, time, reference, and reason. Stock-in and opening-stock reasons are optional, with automatic defaults of `Stock received` and `Opening stock`. Stock-out, counts, and signed adjustments require a manual reason. Stock postings need manager password approval. Negative stock is rejected.
+- Stock on hand is maintained from an append-only movement ledger: starting stock and received deliveries add units, completed sales subtract them, and approved returns can restock them. Stock documents record user, time, reference, and reason. The form records `Stock received` or `Opening stock` automatically. Manual stock-out, physical count resets, and signed adjustments are rejected. Stock postings need manager password approval. Negative stock is rejected.
 - Stock displayed while building a cart is advisory. Stock is checked again in the final checkout transaction. When both cashiers try to buy the last unit, only the first valid committed sale succeeds.
 
 ## Checkout and duplicate prevention
@@ -84,4 +84,4 @@ This offline setup has a single host. A failed host drive can cause loss since t
 
 ## Details still to confirm
 
-Receipt printer/model and format; bazaar currency and tax rules; whether items may be sold by weight or other fractional units; accepted payment methods; discount permissions; expected item count and sales volume; backup destination and acceptable maximum data-loss window. These choices do not change the core two-laptop architecture or duplicate-save rule.
+Receipt printer/model and format; bazaar currency and tax rules; whether items may be sold by weight or other fractional units; accepted payment methods; statutory discount requirements; expected item count and sales volume; backup destination and acceptable maximum data-loss window. These choices do not change the core two-laptop architecture or duplicate-save rule.

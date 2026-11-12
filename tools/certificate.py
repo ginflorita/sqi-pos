@@ -24,7 +24,7 @@ def main():
     if cert_path.exists() or key_path.exists():
         parser.error('Certificate files already exist. Use a new output directory for renewal.')
     private = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'Bazaar POS local server')])
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'SQI POS local server')])
     current = datetime.now(timezone.utc)
     cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject).public_key(private.public_key())
             .serial_number(x509.random_serial_number()).not_valid_before(current-timedelta(minutes=5))
