@@ -24,6 +24,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .db import audit, connect, digest, initialize, now, transaction as database_transaction
+from .build import build_id
 from .report_export import export_report
 
 
@@ -162,6 +163,7 @@ def signed_in(manager=False):
 def create_app(database=None, backups=None, secure=False, testing=False):
     root = Path(__file__).resolve().parent.parent
     app = Flask(__name__, template_folder=str(root / 'templates'), static_folder=str(root / 'static'))
+    running_build = build_id()
     app.config.update(DATABASE=str(database or root / 'data' / 'pos.sqlite3'),
                       BACKUP_DIR=str(backups or os.environ.get('POS_BACKUP_DIR', root / 'backups')),
                       SECURE_COOKIES=secure, TESTING=testing, MAX_CONTENT_LENGTH=6 * 1024 * 1024)
@@ -215,8 +217,22 @@ def create_app(database=None, backups=None, secure=False, testing=False):
 
     def active_bazaar():
         row = db().execute("SELECT * FROM bazaars WHERE status='active'").fetchone()
-        require(row, 'Set up the POS on the main laptop first.', 409)
+        require(row, 'Ask the IT System Administrator to start the next event.', 409)
         return row
+
+    def report_bazaar():
+        requested = request.args.get('event_id', '')
+        if requested:
+            require(g.user['role'] == 'it_admin', 'Only the IT System Administrator can open archived events.', 403)
+            require(requested.isdecimal() and int(requested)>0, 'Choose a valid event.')
+            row = db().execute('SELECT * FROM bazaars WHERE bazaar_id=?', (int(requested),)).fetchone()
+            require(row, 'Event not found.', 404)
+            return row
+        return db().execute("SELECT * FROM bazaars WHERE status='active'").fetchone()
+
+    def require_it_admin():
+        require(g.user and g.user['role']=='it_admin' and g.user['username'].lower()=='ginflorita',
+                'Only the IT System Administrator can start or end an event.', 403)
 
     def active_day():
         row = db().execute("SELECT * FROM bazaar_days WHERE status='open'").fetchone()
@@ -323,6 +339,15 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     def index():
         return render_template('index.html')
 
+    @app.get('/api/server-info')
+    def server_info():
+        # A loaded process retains its startup identity even while update files
+        # are copied over it. The launcher checks this before opening the app.
+        result = {'build': running_build, 'restart_needed': build_id() != running_build}
+        if request.remote_addr in ('127.0.0.1', '::1'):
+            result['pid'] = os.getpid()
+        return jsonify(result)
+
     @app.get('/api/state')
     def state():
         result = {'setup_required': not bool(db().execute('SELECT 1 FROM users LIMIT 1').fetchone()), 'csrf': g.csrf,
@@ -428,7 +453,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     def catalog():
         products = db().execute('''SELECT p.*,c.name category_name,b.quantity_on_hand,pr.price_id,pr.amount_minor,
             pr.amount_minor AS selling_price_minor,
-            i.product_image_id,EXISTS(SELECT 1 FROM stock_movements m WHERE m.product_id=p.product_id) has_stock_history
+            i.product_image_id,EXISTS(SELECT 1 FROM stock_movements m WHERE m.product_id=p.product_id
+                AND m.bazaar_id=(SELECT bazaar_id FROM bazaars WHERE status='active')) has_stock_history
             FROM products p JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
             LEFT JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
             LEFT JOIN product_images i ON i.product_id=p.product_id AND i.superseded_at IS NULL ORDER BY p.description''').fetchall()
@@ -654,6 +680,96 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         backup = perform_backup(g.user['user_id'])
         return jsonify(ok=True, backup=backup)
 
+    @app.get('/api/events')
+    @signed_in(True)
+    def events_get():
+        require_it_admin()
+        return jsonify(events=[dict(row) for row in db().execute(
+            'SELECT * FROM bazaars ORDER BY bazaar_id DESC')])
+
+    @app.post('/api/events/rename')
+    @signed_in(True)
+    def event_rename():
+        require_it_admin()
+        data=payload()
+        name=text_field(data,'event_name',120,label='event name')
+        reauth(data)
+        with transaction(db()):
+            current=active_bazaar()
+            db().execute('UPDATE bazaars SET event_name=? WHERE bazaar_id=?',(name,current['bazaar_id']))
+            event('event.renamed','bazaars',current['bazaar_id'],bazaar=current['bazaar_id'],
+                  before={'event_name':current['event_name']},after={'event_name':name},
+                  approved=g.user['user_id'])
+        return jsonify(ok=True)
+
+    @app.post('/api/events/end')
+    @signed_in(True)
+    def event_end():
+        require_it_admin()
+        reauth(payload())
+        with transaction(db()):
+            current = active_bazaar()
+            require(not db().execute("SELECT 1 FROM bazaar_days WHERE status='open'").fetchone(),
+                    'Ask the manager to close the business day first.', 409)
+            require(not db().execute("SELECT 1 FROM shifts WHERE status='open'").fetchone(),
+                    'Close every cashier shift first.', 409)
+            require(not db().execute("SELECT 1 FROM purchase_tickets WHERE state='open'").fetchone(),
+                    'Complete or cancel every unpaid order first.', 409)
+            require(not db().execute("SELECT 1 FROM receipt_print_jobs WHERE status IN ('queued','claimed')").fetchone(),
+                    'Review pending receipt print jobs in Printer before ending this event.',409)
+            db().execute("UPDATE bazaars SET status='closed',ends_on=? WHERE bazaar_id=?",
+                         (datetime.now(ZoneInfo(current['timezone'])).date().isoformat(),current['bazaar_id']))
+            event('event.ended','bazaars',current['bazaar_id'],bazaar=current['bazaar_id'],
+                  after={'event_name':current['event_name']},approved=g.user['user_id'])
+        backup=perform_backup(g.user['user_id'])
+        if backup['status']=='verified':
+            with transaction(db()):
+                db().execute('UPDATE bazaars SET archive_backup=? WHERE bazaar_id=?',
+                             (backup['filename'],current['bazaar_id']))
+            return jsonify(ok=True,archive=backup)
+        return jsonify(error='The event ended, but its archive backup failed. Retry the archive before starting a new event.'),503
+
+    @app.post('/api/events/archive')
+    @signed_in(True)
+    def event_archive_retry():
+        require_it_admin()
+        reauth(payload())
+        require(not db().execute("SELECT 1 FROM bazaars WHERE status='active'").fetchone(),
+                'End the current event before archiving.', 409)
+        last=db().execute('SELECT * FROM bazaars ORDER BY bazaar_id DESC LIMIT 1').fetchone()
+        require(last and last['status']=='closed' and not last['archive_backup'],
+                'There is no event waiting for an archive.', 409)
+        backup=perform_backup(g.user['user_id'])
+        require(backup['status']=='verified','The archive backup failed. Check Backups and try again.',503)
+        with transaction(db()):
+            db().execute('UPDATE bazaars SET archive_backup=? WHERE bazaar_id=?',
+                         (backup['filename'],last['bazaar_id']))
+        return jsonify(ok=True,archive=backup)
+
+    @app.post('/api/events/start')
+    @signed_in(True)
+    def event_start():
+        require_it_admin()
+        data=payload()
+        name=text_field(data,'event_name',120,label='event name')
+        reauth(data)
+        with transaction(db()):
+            require(not db().execute("SELECT 1 FROM bazaars WHERE status='active'").fetchone(),
+                    'End the current event first.',409)
+            previous=db().execute('SELECT * FROM bazaars ORDER BY bazaar_id DESC LIMIT 1').fetchone()
+            require(previous and previous['status']=='closed' and previous['archive_backup'],
+                    'Verify the previous event archive before starting another event.',409)
+            require((Path(app.config['BACKUP_DIR'])/previous['archive_backup']).is_file(),
+                    'The previous event archive file is missing. Restore it before starting another event.',409)
+            bid=db().execute('''INSERT INTO bazaars(name,starts_on,timezone,currency_code,status,
+                created_by_user_id,created_at,event_name) VALUES(?,?,?,?,'active',?,?,?)''',
+                (previous['name'],datetime.now(ZoneInfo(previous['timezone'])).date().isoformat(),
+                 previous['timezone'],previous['currency_code'],g.user['user_id'],now(),name)).lastrowid
+            db().execute('UPDATE stock_balances SET quantity_on_hand=0,updated_at=?',(now(),))
+            event('event.started','bazaars',bid,bazaar=bid,
+                  after={'event_name':name,'stock_on_hand':0},approved=g.user['user_id'])
+        return jsonify(ok=True,event_id=bid)
+
     def cash_expected(sid):
         opening = db().execute('SELECT opening_cash_minor FROM shifts WHERE shift_id=?', (sid,)).fetchone()[0]
         incoming = db().execute('SELECT COALESCE(SUM(p.amount_minor),0) FROM payments p JOIN sales s USING(sale_id) WHERE s.shift_id=?', (sid,)).fetchone()[0]
@@ -666,7 +782,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     def shifts_get():
         status = request.args.get('status')
         require(status in (None, 'open', 'closed'), 'Choose open or closed shifts.', 400)
-        filters, params = [], []
+        current=report_bazaar()
+        filters, params = ['d.bazaar_id=?'], [current['bazaar_id'] if current else -1]
         if g.user['role'] not in ('manager', 'it_admin'):
             filters.append('s.cashier_user_id=?')
             params.append(g.user['user_id'])
@@ -674,7 +791,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             filters.append('s.status=?')
             params.append(status)
         clause = ' WHERE ' + ' AND '.join(filters) if filters else ''
-        total = db().execute('SELECT COUNT(*) FROM shifts s' + clause, params).fetchone()[0]
+        total = db().execute('SELECT COUNT(*) FROM shifts s JOIN bazaar_days d USING(bazaar_day_id)' + clause, params).fetchone()[0]
         page, page_size = 1, 200
         if status == 'closed':
             page_arg, size_arg = request.args.get('page', '1'), request.args.get('page_size', '10')
@@ -818,7 +935,9 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 balance = db().execute('SELECT * FROM stock_balances WHERE product_id=?', (line['product_id'],)).fetchone()
                 require(balance, 'Stock item not found.', 404)
                 if kind == 'opening':
-                    require(not db().execute('SELECT 1 FROM stock_movements WHERE product_id=? LIMIT 1', (line['product_id'],)).fetchone(), 'Opening stock is only allowed before an item has any movements.', 409)
+                    require(not db().execute('SELECT 1 FROM stock_movements WHERE product_id=? AND bazaar_id=? LIMIT 1',
+                                             (line['product_id'],bazaar['bazaar_id'])).fetchone(),
+                            'Opening stock is only allowed before an item has movements in this event.', 409)
                 change = line['quantity']
                 lid = db().execute('INSERT INTO stock_document_lines(stock_document_id,product_id,quantity_change,expected_quantity,counted_quantity) VALUES(?,?,?,?,?)',
                     (sid, line['product_id'], change, None, None)).lastrowid
@@ -835,13 +954,16 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             COALESCE(sd.document_type,CASE WHEN m.sale_line_id IS NOT NULL THEN 'sale' ELSE 'return' END) movement_type,
             sd.reason FROM stock_movements m JOIN products p USING(product_id) JOIN users u ON u.user_id=m.created_by_user_id
             LEFT JOIN bazaar_days d USING(bazaar_day_id) LEFT JOIN stock_document_lines dl USING(stock_document_line_id)
-            LEFT JOIN stock_documents sd USING(stock_document_id) ORDER BY m.stock_movement_id DESC LIMIT 500''').fetchall()
+            LEFT JOIN stock_documents sd USING(stock_document_id)
+            WHERE m.bazaar_id=(SELECT bazaar_id FROM bazaars WHERE status='active')
+            ORDER BY m.stock_movement_id DESC LIMIT 500''').fetchall()
         return jsonify(movements=[dict(r) for r in rows])
 
     @app.get('/api/inventory')
     @signed_in(True)
     def inventory_report():
-        bazaar = active_bazaar()
+        bazaar = report_bazaar()
+        require(bazaar, 'Ask the IT System Administrator to start the next event.',409)
         dates = {}
         for name in ('from', 'to'):
             value = request.args.get(name, '')
@@ -885,16 +1007,17 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             params.extend([f'%{search}%'] * 3)
         where = ' WHERE ' + ' AND '.join(filters) if filters else ''
         product_rows = db().execute('''SELECT p.product_id,p.sku,p.description,p.unit,p.active,
-                p.category_id,c.name category_name,b.quantity_on_hand,COALESCE(pr.amount_minor,0) amount_minor,
+                p.category_id,c.name category_name,COALESCE(SUM(m.quantity_change),0) quantity_on_hand,
+                COALESCE(pr.amount_minor,0) amount_minor,
                 COALESCE(SUM(CASE WHEN m.created_at<? THEN m.quantity_change ELSE 0 END),0) opening,
                 COALESCE(SUM(CASE WHEN m.created_at>=? AND m.created_at<? AND m.stock_document_line_id IS NOT NULL THEN m.quantity_change ELSE 0 END),0) added,
                 COALESCE(SUM(CASE WHEN m.created_at>=? AND m.created_at<? AND m.sale_line_id IS NOT NULL THEN -m.quantity_change ELSE 0 END),0) sold,
                 COALESCE(SUM(CASE WHEN m.created_at>=? AND m.created_at<? AND m.correction_line_id IS NOT NULL THEN m.quantity_change ELSE 0 END),0) restocked
             FROM products p JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
             LEFT JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
-            LEFT JOIN stock_movements m ON m.product_id=p.product_id'''+where+'''
+            LEFT JOIN stock_movements m ON m.product_id=p.product_id AND m.bazaar_id=?'''+where+'''
             GROUP BY p.product_id ORDER BY p.description COLLATE NOCASE,p.product_id''',
-            (start, start, end, start, end, start, end, *params)).fetchall()
+            (start, start, end, start, end, start, end, bazaar['bazaar_id'], *params)).fetchall()
         products = []
         categories = {}
         totals = {'products': 0, 'opening': 0, 'added': 0, 'sold': 0, 'restocked': 0,
@@ -916,8 +1039,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                     summary[key] += item[key]
                 summary['current'] += item['quantity_on_hand']
 
-        movement_filters = ['m.created_at>=?', 'm.created_at<?', *filters]
-        movement_params = [start, end, *params]
+        movement_filters = ['m.bazaar_id=?','m.created_at>=?', 'm.created_at<?', *filters]
+        movement_params = [bazaar['bazaar_id'],start, end, *params]
         movement_where = ' WHERE ' + ' AND '.join(movement_filters)
         movement_from = ''' FROM stock_movements m JOIN products p USING(product_id)
             JOIN categories c USING(category_id) JOIN users u ON u.user_id=m.created_by_user_id
@@ -949,7 +1072,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             product_total=len(products), product_page=product_page, product_page_size=product_size,
             movements=[dict(row) for row in movements], movement_total=movement_total,
             movement_page=movement_page, movement_page_size=movement_size,
-            timezone=bazaar['timezone'])
+            timezone=bazaar['timezone'],currency_code=bazaar['currency_code'])
 
     def get_ticket(tid, enforce_owner=True):
         ticket = db().execute('SELECT * FROM purchase_tickets WHERE purchase_ticket_id=?', (tid,)).fetchone()
@@ -1173,7 +1296,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         return jsonify(sale_id=sid, replayed=False)
 
     def sale_access(sid):
-        sale = db().execute('''SELECT s.*,u.display_name,d.day_number,d.business_date,b.name bazaar_name,b.currency_code,b.timezone
+        sale = db().execute('''SELECT s.*,u.display_name,d.day_number,d.business_date,b.bazaar_id event_id,
+            b.name bazaar_name,b.currency_code,b.timezone
             FROM sales s JOIN users u ON u.user_id=s.cashier_user_id JOIN bazaar_days d USING(bazaar_day_id) JOIN bazaars b USING(bazaar_id) WHERE s.sale_id=?''', (sid,)).fetchone()
         require(sale, 'Sale not found.', 404)
         require(g.user['role'] in ('manager', 'it_admin') or sale['cashier_user_id'] == g.user['user_id'], 'You can view only your own receipts.', 403)
@@ -1221,7 +1345,9 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         require(len({l[0] for l in normalized}) == len(normalized), 'Duplicate correction line.')
         fingerprint=digest(json.dumps([sid,kind,sorted(normalized),reason]))
         with transaction(db()):
-            sale_access(sid)
+            sale=sale_access(sid)
+            require(sale['event_id']==active_bazaar()['bazaar_id'],
+                    'This receipt belongs to a finished event and cannot be returned or voided in the current event.',409)
             old = db().execute('SELECT * FROM sale_corrections WHERE request_key=?',(key,)).fetchone()
             if old:
                 a=db().execute("SELECT after_json FROM audit_events WHERE action='sale.corrected' AND entity_key=?",(str(old['sale_correction_id']),)).fetchone()
@@ -1296,12 +1422,16 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @app.get('/api/filters')
     @signed_in()
     def filters():
-        return jsonify(days=[dict(r) for r in db().execute('SELECT * FROM bazaar_days ORDER BY day_number DESC')],
+        current=report_bazaar()
+        return jsonify(days=[dict(r) for r in db().execute(
+                           'SELECT * FROM bazaar_days WHERE bazaar_id=? ORDER BY day_number DESC',
+                           (current['bazaar_id'] if current else -1,))],
                        users=[dict(r) for r in db().execute('SELECT user_id,display_name FROM users ORDER BY display_name')],
                        terminals=[dict(r) for r in db().execute('SELECT terminal_id,name FROM terminals ORDER BY terminal_id')])
 
     def report_filters(sale_alias='s', line_alias='l', day_alias='d', correction=False):
-        clauses,params=[],[]
+        current=report_bazaar()
+        clauses,params=[f'{day_alias}.bazaar_id=?'],[current['bazaar_id'] if current else -1]
         for arg,column in [('day_id',f'{day_alias}.bazaar_day_id'),('user_id',f'{sale_alias}.created_by_user_id' if correction else f'{sale_alias}.cashier_user_id'),
                            ('product_id',f'{line_alias}.product_id'),('category_id',f'{line_alias}.category_id_snapshot')]:
             value=request.args.get(arg)
@@ -1328,11 +1458,29 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @signed_in()
     def sales_get():
         where,params=report_filters()
+        search=request.args.get('q','').strip()[:120]
+        if search:
+            where+=(' AND ' if where else ' WHERE ')+'''(
+                instr(lower(s.receipt_number),lower(?))>0 OR
+                instr(lower(replace(s.receipt_number,'BZ-','SQI-')),lower(?))>0 OR
+                instr(lower(u.display_name),lower(?))>0 OR
+                instr(lower(u.username),lower(?))>0 OR
+                instr(lower(l.sku_snapshot),lower(?))>0 OR
+                instr(lower(l.description_snapshot),lower(?))>0 OR
+                instr(lower(l.short_description_snapshot),lower(?))>0)'''
+            params.extend([search]*7)
+        page_arg,size_arg=request.args.get('page','1'),request.args.get('page_size','10')
+        require(page_arg.isdecimal() and len(page_arg)<=8 and int(page_arg)>0,'Invalid sales page.')
+        require(size_arg.isdecimal() and len(size_arg)<=3 and 1<=int(size_arg)<=50,'Invalid sales page size.')
+        page,page_size=int(page_arg),int(size_arg)
+        source=''' FROM sales s JOIN sale_lines l USING(sale_id) JOIN bazaar_days d USING(bazaar_day_id)
+            JOIN users u ON u.user_id=s.cashier_user_id'''+where
+        total=db().execute('SELECT COUNT(DISTINCT s.sale_id)'+source,params).fetchone()[0]
+        page=min(page,max(1,(total+page_size-1)//page_size))
         rows=db().execute('''SELECT DISTINCT s.*,u.display_name,d.day_number,d.business_date,
-            COALESCE((SELECT SUM(refund_total_minor) FROM sale_corrections WHERE original_sale_id=s.sale_id),0) refunded_minor
-            FROM sales s JOIN sale_lines l USING(sale_id) JOIN bazaar_days d USING(bazaar_day_id)
-            JOIN users u ON u.user_id=s.cashier_user_id'''+where+' ORDER BY s.sale_id DESC LIMIT 500',params).fetchall()
-        return jsonify(sales=[dict(r) for r in rows])
+            COALESCE((SELECT SUM(refund_total_minor) FROM sale_corrections WHERE original_sale_id=s.sale_id),0) refunded_minor'''
+            +source+' ORDER BY s.sale_id DESC LIMIT ? OFFSET ?',params+[page_size,(page-1)*page_size]).fetchall()
+        return jsonify(sales=[dict(r) for r in rows],total=total,page=page,page_size=page_size)
 
     @app.get('/api/reports')
     @signed_in(True)
@@ -1364,7 +1512,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         result={'summary':{'transactions':len({r['sale_id'] for r in sales_rows}),'units':sum(r['quantity'] for r in sales_rows),'returned_units':sum(r['quantity'] for r in refunds),'gross_minor':gross,'discount_minor':sum(r['discount_minor'] for r in sales_rows),'tax_minor':sum(r['tax_minor'] for r in sales_rows),'sales_minor':total,'refunds_minor':refund,'net_minor':total-refund},**groups}
         start_arg,end_arg=request.args.get('from'),request.args.get('to')
         require(not (start_arg and end_arg and start_arg>end_arg),'Report start date must be on or before the end date.')
-        day_clauses=[];day_params=[]
+        selected=report_bazaar()
+        day_clauses=['bazaar_id=?'];day_params=[selected['bazaar_id'] if selected else -1]
         if request.args.get('day_id'):
             day_clauses.append('bazaar_day_id=?');day_params.append(int(request.args['day_id']))
         if start_arg:
@@ -1372,7 +1521,8 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         if end_arg:
             day_clauses.append('business_date<=?');day_params.append(end_arg)
         business_days=db().execute('SELECT day_number,business_date FROM bazaar_days'+(' WHERE '+' AND '.join(day_clauses) if day_clauses else '')+' ORDER BY business_date',day_params).fetchall()
-        bazaar=db().execute("SELECT currency_code,timezone FROM bazaars WHERE status='active'").fetchone()
+        bazaar=selected or db().execute('SELECT bazaar_id,currency_code,timezone FROM bazaars ORDER BY bazaar_id DESC LIMIT 1').fetchone()
+        result['currency_code']=bazaar['currency_code']
         listed_dates=[r['business_date'] for r in business_days]
         listed_dates.extend(r['business_date'] for r in sales_rows)
         listed_dates.extend(r['business_date'] for r in refunds)
@@ -1381,7 +1531,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         last=max(listed_dates) if listed_dates else today
         start=start_arg or min(first,end_arg or first)
         end=end_arg or max(last,start_arg or last)
-        filename=f'SQI-POS-({start}-to-{end})'
+        filename=f'SQI-POS-Event-{bazaar["bazaar_id"]:03d}-({start}-to-{end})'
         if request.args.get('format')=='xlsx':
             scope=[]
             for key,table,id_column,label_column,prefix in (
@@ -1409,11 +1559,13 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @app.get('/api/audit')
     @signed_in(True)
     def audit_get():
+        current=report_bazaar()
         rows=db().execute('''SELECT a.*,u.display_name,t.name terminal_name,subject.display_name subject_display_name FROM audit_events a
             LEFT JOIN users u ON u.user_id=a.actor_user_id LEFT JOIN terminals t USING(terminal_id)
             LEFT JOIN shifts s ON a.entity_type='shifts' AND s.shift_id=CAST(a.entity_key AS INTEGER)
             LEFT JOIN users subject ON subject.user_id=s.cashier_user_id
-            ORDER BY audit_event_id DESC LIMIT 500''').fetchall()
+            WHERE a.bazaar_id=? ORDER BY audit_event_id DESC LIMIT 500''',
+            (current['bazaar_id'] if current else -1,)).fetchall()
         return jsonify(events=[dict(r) for r in rows])
 
     def perform_backup(actor=None):

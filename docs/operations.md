@@ -46,7 +46,7 @@ Create the second cashier in Team. Sign in on Laptop 2 with that account; no lap
 
 Click **Checkout** in the sidebar to choose **Open fullscreen** or **Standard view**. Cancel, the close button, or Escape dismisses this choice without leaving the current section. Checkout also has a **Fullscreen** button.
 
-Fullscreen hides the sidebar and workspace header, giving products and Current order the full page. Use **Exit fullscreen** or Escape to restore navigation. While Checkout is open, the browser checks the product catalog and stock every 30 seconds in the background; checkout checks stock again before saving a sale. This background check does not keep an idle login active. The app requests browser fullscreen when supported; if the browser declines, the expanded checkout layout still works. Leaving Checkout or signing out restores the standard layout. Reloading the browser starts in the standard view.
+Fullscreen hides the sidebar and workspace header, giving products and Current order the full page. Use **Exit fullscreen** or Escape to restore navigation. Choose quantity and Set quantity have an on-screen number pad on the right; a keyboard can still be used. While Checkout is open, the browser checks the product catalog and stock every 30 seconds in the background; checkout checks stock again before saving a sale. This background check does not keep an idle login active. The app requests browser fullscreen when supported; if the browser declines, the expanded checkout layout still works. Leaving Checkout or signing out restores the standard layout. Reloading the browser starts in the standard view.
 
 Current order uses compact text-only rows with **SKU | DESC | QTY | TOTAL**. Select **View** under DESC to open the full description, SKU, and unit price. Use the +/− controls under QTY to adjust an existing line. Product thumbnails remain in Browse products; they are omitted from the order rows.
 
@@ -75,11 +75,19 @@ Transfer orders using the icon beside the ticket number. The receiving cashier n
 
 After a lost payment response, keep the same browser and ticket. Refresh when connected: the app checks the saved pending request and retrieves the original receipt if committed, or allows retry of that request. Resolve its outcome before starting a new order. Checkout pauses if the host or network is unavailable.
 
-Managers can open original receipts in Transactions to return items or void the full sale, with password confirmation and a reason. Returned quantity cannot exceed the remaining sold amount. Voids are unavailable after partial returns. Restocking is explicit; damaged goods can have zero restock. Refunds use the original price and the current day's shift. Record a documented cash-in if that drawer has insufficient expected cash. Cash in/out does not count as sales.
+Managers can open original receipts in Transactions to return items or void the full sale, with password confirmation and a reason. Returned quantity cannot exceed the remaining sold amount. Voids are unavailable after partial returns. Restocking is explicit; damaged goods can have zero restock. Refunds use the original price and the current day's shift.
 
 The return form automatically shows each item's refund and **Refund to customer** as quantities change. Refunds use the amount actually paid after any discount; odd cents are distributed across the sold units so returning all units refunds the full paid line amount. Restock quantity only changes inventory and does not change the refund. Invalid or excessive return quantities show a validation message instead of a misleading total. Review the amount before **Record correction**; the server calculates and validates the saved refund, and the cashier physically gives the cash to the customer.
 
 If a cashier's laptop is unavailable, the manager can use **Cashier shifts → Manager close** from a signed-in browser. Count the physical drawer, record a reason, and confirm the manager password. If the shift has an unpaid order, review its items and explicitly confirm cancellation; a changed order requires a fresh review. The server serializes closure against checkout and records both cancellation and closure in the audit. This allows a lost-laptop shift to be reconciled without rewriting its sales.
+
+## Events, days, and shifts
+
+The IT System Administrator (`ginflorita`) controls the overall event in **Management → Events**. A manager opens and closes business days within the event. Each cashier opens and closes a shift within an open day. The initial installed database begins with **Event 1**; the administrator can rename it before ending it.
+
+To finish an event, complete or cancel unpaid orders, close every cashier shift, close the business day, and resolve pending receipt print jobs. The administrator then reviews the cash and reports, selects **End event**, and confirms with their password. The POS closes the event and creates a verified database archive. If archiving fails, **Retry archive** must succeed before another event can start.
+
+**Start event** keeps the product list, categories, images, current prices, saved product drafts, accounts, and printer settings. It resets the current stock balance to zero. The manager then opens Day 1, and staff record opening stock for the new event. Current Transactions, Reports, Inventory, Cashier shifts, and Audit trail show only the new event. Past events remain read-only under **Events**, with report, inventory, and audit views and an Excel report download. Verified database archives retain the complete original records. Receipt numbers continue to use globally increasing day and ticket IDs, so they do not repeat across events.
 
 ## Backups
 

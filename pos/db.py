@@ -28,7 +28,7 @@ def initialize(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
         schema_version = db.execute('PRAGMA user_version').fetchone()[0]
-        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9):
+        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             raise RuntimeError('Unsupported database version. Restore the matching application.')
         db.execute('PRAGMA journal_mode=WAL')
         if schema_version == 1:
@@ -94,6 +94,19 @@ def initialize(path):
                     db.execute('ALTER TABLE users_new RENAME TO users')
             finally:
                 db.execute('PRAGMA foreign_keys=ON')
+        if 1 <= schema_version <= 9:
+            for table, column, definition in (
+                ('bazaars', 'event_name', "TEXT NOT NULL DEFAULT 'Event 1'"),
+                ('bazaars', 'archive_backup', 'TEXT'),
+                ('audit_events', 'bazaar_id', 'INTEGER REFERENCES bazaars(bazaar_id)'),
+            ):
+                if column not in {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}:
+                    db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+            db.execute('DROP TRIGGER IF EXISTS immutable_audit_events_UPDATE')
+            db.execute('''UPDATE audit_events SET bazaar_id=COALESCE(
+                (SELECT bazaar_id FROM bazaar_days WHERE bazaar_day_id=audit_events.bazaar_day_id),
+                (SELECT bazaar_id FROM bazaars ORDER BY bazaar_id DESC LIMIT 1))
+                WHERE bazaar_id IS NULL''')
         db.executescript(Path(__file__).with_name('schema.sql').read_text(encoding='utf-8'))
         db.execute('INSERT OR IGNORE INTO system_settings(system_setting_id,instance_key,created_at) VALUES(1,?,?)',
                    (secrets.token_hex(24),now()))
@@ -113,7 +126,9 @@ def initialize(path):
         if result != 'ok' or db.execute('PRAGMA foreign_key_check').fetchone():
             raise RuntimeError('Database integrity check failed. Checkout is disabled.')
         mismatch = db.execute('''SELECT b.product_id FROM stock_balances b LEFT JOIN
-            (SELECT product_id,SUM(quantity_change) q FROM stock_movements GROUP BY product_id) m USING(product_id)
+            (SELECT product_id,SUM(quantity_change) q FROM stock_movements
+                WHERE bazaar_id=COALESCE((SELECT bazaar_id FROM bazaars WHERE status='active'),
+                    (SELECT MAX(bazaar_id) FROM bazaars)) GROUP BY product_id) m USING(product_id)
             WHERE b.quantity_on_hand<>COALESCE(m.q,0) LIMIT 1''').fetchone()
         if mismatch:
             raise RuntimeError('Stock ledger does not reconcile. Checkout is disabled.')
@@ -132,10 +147,17 @@ def transaction(db):
 
 
 def audit(db, action, entity_type, entity_key=None, actor=None, terminal=None,
-          day=None, before=None, after=None, reason=None, approved=None, username=None):
+          day=None, before=None, after=None, reason=None, approved=None, username=None, bazaar=None):
+    if bazaar is None and day is not None:
+        row = db.execute('SELECT bazaar_id FROM bazaar_days WHERE bazaar_day_id=?', (day,)).fetchone()
+        bazaar = row['bazaar_id'] if row else None
+    if bazaar is None:
+        row = db.execute('''SELECT bazaar_id FROM bazaars
+            ORDER BY CASE status WHEN 'active' THEN 1 ELSE 0 END DESC,bazaar_id DESC LIMIT 1''').fetchone()
+        bazaar = row['bazaar_id'] if row else None
     db.execute('''INSERT INTO audit_events(bazaar_day_id,actor_user_id,terminal_id,attempted_username,
-        action,entity_type,entity_key,before_json,after_json,reason,approved_by_user_id,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (day, actor, terminal, username, action, entity_type,
+        action,entity_type,entity_key,before_json,after_json,reason,approved_by_user_id,created_at,bazaar_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''', (day, actor, terminal, username, action, entity_type,
         str(entity_key) if entity_key is not None else None,
         json.dumps(before, ensure_ascii=False) if before is not None else None,
-        json.dumps(after, ensure_ascii=False) if after is not None else None, reason, approved, now()))
+        json.dumps(after, ensure_ascii=False) if after is not None else None, reason, approved, now(), bazaar))

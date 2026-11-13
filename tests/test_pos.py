@@ -7,6 +7,7 @@ import shutil
 import uuid
 import threading
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,6 +17,7 @@ from openpyxl import Workbook, load_workbook
 from PIL import Image
 
 from pos.app import create_app
+from pos.build import build_id
 from pos.db import connect, initialize
 from pos.printing import receipt_image, receipt_item_name
 
@@ -41,6 +43,16 @@ class POSTest(unittest.TestCase):
     def tearDown(self):
         if self.folder.resolve().is_relative_to(self.test_root.resolve()):
             shutil.rmtree(self.folder)
+
+    def test_server_info_detects_changed_application_files(self):
+        current = self.client.get('/api/server-info')
+        self.assertEqual(current.status_code, 200)
+        self.assertEqual(current.json['build'], build_id())
+        self.assertFalse(current.json['restart_needed'])
+        with patch('pos.app.build_id', return_value='files-replaced'):
+            stale = self.client.get('/api/server-info')
+        self.assertEqual(stale.json['build'], current.json['build'])
+        self.assertTrue(stale.json['restart_needed'])
 
     def call(self,path,data=None,method='POST',client=None,csrf=None,expected=200):
         client=client or self.client
@@ -110,6 +122,103 @@ class POSTest(unittest.TestCase):
         receipt=self.client.get('/api/sales/'+str(first['sale_id'])).json
         self.assertEqual(receipt['sale']['receipt_number'],'SQI-001-000001')
         self.assertEqual(receipt['payment']['change_minor'],7450)
+
+    def test_sales_search_and_pagination(self):
+        other=self.call('/products',{'sku':'TEST-02','description':'Another test item','category_id':self.category,
+            'unit':'pc','amount_minor':5000,'active':True}).json['product_id']
+        self.call('/stock',{'document_type':'in','request_key':'sales-page-other-stock','reference_no':'TEST-2',
+            'manager_password':PASSWORD,'lines':[{'product_id':other,'quantity':2}]})
+        for index in range(2):
+            ticket=self.ticket(index+1)
+            if index==0:
+                ticket=self.call('/tickets/'+str(ticket['purchase_ticket_id']),{'version':ticket['version'],
+                    'lines':[{'product_id':self.product,'quantity':1},{'product_id':other,'quantity':1}]},'PUT').json
+            self.call('/checkout',self.checkout_body(ticket,key=f'sales-page-request-{index:04d}',tendered=40000))
+        first=self.client.get('/api/sales?page_size=1').json
+        self.assertEqual((first['total'],first['page'],first['page_size']),(2,1,1))
+        self.assertEqual(first['sales'][0]['receipt_number'],'SQI-001-000002')
+        second=self.client.get('/api/sales?page=2&page_size=1').json
+        self.assertEqual(second['sales'][0]['receipt_number'],'SQI-001-000001')
+        self.assertEqual(self.client.get('/api/sales?page=99&page_size=1').json['page'],2)
+        self.assertEqual(self.client.get('/api/sales?q=sqi-001-000002').json['total'],1)
+        self.assertEqual(self.client.get('/api/sales?q=TEST-01').json['total'],2)
+        self.assertEqual(self.client.get('/api/sales?q=TEST').json['total'],2)
+        self.assertEqual(self.client.get('/api/sales?q=owner').json['total'],2)
+        self.assertEqual(self.client.get('/api/sales?q=missing').json['total'],0)
+        self.assertEqual(self.client.get('/api/sales?page_size=0').status_code,400)
+
+    def test_event_end_archive_and_fresh_start(self):
+        first=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
+        first_details=self.client.get(f'/api/sales/{first}').json
+        first_receipt=first_details['sale']['receipt_number']
+        self.assertEqual(self.client.get('/api/events').status_code,403)
+        self.assertEqual(self.client.get('/api/reports?event_id=1').status_code,403)
+        self.call('/events/end',{'manager_password':PASSWORD},expected=403)
+        self.call('/shifts/close',{'counted_cash_minor':112550})
+        self.call('/days/close',{'manager_password':PASSWORD})
+        self.call('/logout',{})
+        connection=sqlite3.connect(self.database)
+        try:
+            connection.execute("UPDATE users SET username='ginflorita',role='it_admin' WHERE username='owner'")
+            connection.commit()
+        finally:
+            connection.close()
+        self.call('/login',{'username':'ginflorita','password':PASSWORD})
+        terminal_id=self.client.get('/api/state').json['terminal']['terminal_id']
+        connection=sqlite3.connect(self.database)
+        try:
+            connection.execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,
+                paper_width_mm,status,requested_by_user_id,created_at)
+                VALUES(?,?,'automatic','Test printer',80,'queued',1,'2026-10-19')''',(first,terminal_id))
+            connection.commit()
+        finally:
+            connection.close()
+        self.call('/events/end',{'manager_password':PASSWORD},expected=409)
+        connection=sqlite3.connect(self.database)
+        try:
+            connection.execute("UPDATE receipt_print_jobs SET status='failed' WHERE sale_id=?",(first,))
+            connection.commit()
+        finally:
+            connection.close()
+        blocked=self.folder/'blocked-backup-directory'
+        blocked.write_text('This is a file, not a folder.',encoding='utf-8')
+        self.app.config['BACKUP_DIR']=str(blocked)
+        self.call('/events/end',{'manager_password':PASSWORD},expected=503)
+        self.assertIsNone(self.client.get('/api/events').json['events'][0]['archive_backup'])
+        self.call('/events/start',{'event_name':'Too early','manager_password':PASSWORD},expected=409)
+        self.app.config['BACKUP_DIR']=str(self.folder/'backups')
+        self.call('/events/archive',{'manager_password':PASSWORD})
+        archived=self.client.get('/api/events').json['events'][0]
+        self.assertEqual(archived['status'],'closed')
+        self.assertTrue(archived['archive_backup'])
+        self.assertTrue((self.folder/'backups'/archived['archive_backup']).is_file())
+        self.assertEqual(self.client.get('/api/reports?event_id=1').json['summary']['transactions'],1)
+        self.assertEqual(self.client.get('/api/reports').json['summary']['transactions'],0)
+        self.assertEqual(self.client.get('/api/sales').json['total'],0)
+        self.assertEqual(self.client.get('/api/audit').json['events'],[])
+        self.call('/events/start',{'event_name':'Next event','manager_password':PASSWORD})
+        state=self.client.get('/api/state').json
+        self.assertEqual(state['bazaar']['event_name'],'Next event')
+        self.assertIsNone(state['day'])
+        self.assertEqual(self.client.get('/api/catalog').json['products'][0]['quantity_on_hand'],0)
+        self.assertEqual(self.client.get('/api/inventory').json['summary']['closing'],0)
+        self.assertEqual(self.client.get('/api/inventory?event_id=1').json['summary']['closing'],9)
+        self.assertEqual(self.client.get('/api/reports').json['summary']['transactions'],0)
+        self.assertEqual(self.client.get('/api/reports?event_id=1&format=xlsx').status_code,200)
+        self.assertTrue(any(row['action']=='event.started' for row in self.client.get('/api/audit').json['events']))
+        initialize(self.database)
+        self.call('/days/open',{'business_date':'2026-10-20','manager_password':PASSWORD})
+        self.call('/shifts/open',{'opening_cash_minor':0})
+        self.call(f'/sales/{first}/corrections',{'manager_password':PASSWORD,
+            'request_key':'closed-event-refund-request','reason':'Old event correction','correction_type':'return',
+            'lines':[{'sale_line_id':first_details['lines'][0]['sale_line_id'],'quantity':1,'restock_quantity':0}]},expected=409)
+        self.call('/stock',{'document_type':'opening','request_key':'new-event-opening-stock','reference_no':'NEXT',
+            'manager_password':PASSWORD,'lines':[{'product_id':self.product,'quantity':2}]})
+        second=self.call('/checkout',self.checkout_body(self.ticket(),key='new-event-checkout-request')).json['sale_id']
+        second_receipt=self.client.get(f'/api/sales/{second}').json['sale']['receipt_number']
+        self.assertNotEqual(first_receipt,second_receipt)
+        self.assertEqual(self.client.get('/api/reports').json['summary']['transactions'],1)
+        self.assertEqual(self.client.get('/api/reports?event_id=1').json['summary']['transactions'],1)
 
     def test_inventory_balances_filters_and_posting_dates(self):
         other_category=self.call('/categories',{'name':'Other'}).json['category_id']
@@ -378,7 +487,7 @@ class POSTest(unittest.TestCase):
         legacy_db=self.folder/'legacy.sqlite3'
         legacy_schema=Path(__file__).resolve().parent.parent.joinpath('pos','schema.sql').read_text(encoding='utf-8')
         legacy_schema=legacy_schema.replace("role IN ('it_admin','manager','cashier')",
-            "role IN ('manager','cashier')").replace('PRAGMA user_version=9;','PRAGMA user_version=8;')
+            "role IN ('manager','cashier')").replace('PRAGMA user_version=10;','PRAGMA user_version=8;')
         connection=sqlite3.connect(legacy_db)
         try:
             connection.executescript(legacy_schema)
@@ -389,7 +498,7 @@ class POSTest(unittest.TestCase):
         initialize(legacy_db)
         connection=connect(legacy_db)
         try:
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],9)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],10)
             self.assertEqual([tuple(row) for row in connection.execute('SELECT user_id,role FROM users ORDER BY user_id')],[(1,'it_admin'),(2,'cashier')])
             self.assertEqual(connection.execute('SELECT created_by_user_id FROM users WHERE user_id=2').fetchone()[0],1)
             self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(),[])
@@ -584,7 +693,7 @@ class POSTest(unittest.TestCase):
             connection.execute('PRAGMA user_version=4')
         finally:connection.close()
         initialize(self.database)
-        self.assertEqual(self.scalar('PRAGMA user_version'),9)
+        self.assertEqual(self.scalar('PRAGMA user_version'),10)
         self.assertEqual([r['percent_bp'] for r in self.client.get('/api/discount').json['rates']],[1500])
         restored=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET').json
         self.assertEqual(restored['discount_percent_bp'],1500)
@@ -605,7 +714,7 @@ class POSTest(unittest.TestCase):
         self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
         response=self.client.get('/api/reports?format=xlsx&from=2026-10-19&to=2026-10-20')
         self.assertEqual(response.status_code,200)
-        self.assertIn('SQI-POS-(2026-10-19-to-2026-10-20).xlsx',response.headers['Content-Disposition'])
+        self.assertIn('SQI-POS-Event-001-(2026-10-19-to-2026-10-20).xlsx',response.headers['Content-Disposition'])
         workbook=load_workbook(io.BytesIO(response.data),read_only=False,data_only=True)
         try:
             self.assertEqual(workbook.sheetnames,['Summary','Days','Items','Category','Cashier'])
@@ -803,7 +912,7 @@ class POSTest(unittest.TestCase):
         csv=self.client.get('/api/reports?format=csv').get_data(as_text=True)
         self.assertIn("'=UNSAFE()",csv)
         response=self.client.get('/api/reports?format=xlsx&category_id='+str(c))
-        self.assertIn('SQI-POS-(2026-10-19-to-2026-10-19).xlsx',response.headers['Content-Disposition'])
+        self.assertIn('SQI-POS-Event-001-(2026-10-19-to-2026-10-19).xlsx',response.headers['Content-Disposition'])
         workbook=load_workbook(io.BytesIO(response.data))
         try:
             self.assertEqual(workbook['Category']['A8'].value,"'=UNSAFE()")

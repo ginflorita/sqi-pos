@@ -13,7 +13,7 @@ $shell = New-Object -ComObject WScript.Shell
 $open = $shell.CreateShortcut((Join-Path $desktop 'Start SQI POS.lnk'))
 $open.TargetPath = $launcher
 $open.WorkingDirectory = $root
-$open.Description = 'Start the HTTPS POS server for both laptops and open the main counter'
+$open.Description = 'Start the HTTPS POS server for both laptops and open the POS app window'
 $open.Save()
 
 $auto = $shell.CreateShortcut((Join-Path $startup 'SQI POS Server.lnk'))

@@ -1,4 +1,4 @@
-param([string]$Address)
+param([string]$Address, [string]$ShortcutDirectory = [Environment]::GetFolderPath('Desktop'))
 
 $ErrorActionPreference = 'Stop'
 if (-not $Address) {
@@ -10,8 +10,19 @@ if ($address -notmatch '^[a-zA-Z0-9.-]+$' -or $address -eq 'localhost' -or $addr
 }
 $url = "https://${address}:8765/"
 $root = Split-Path $PSScriptRoot -Parent
-$shortcut = Join-Path $root 'SQI-POS-Second-Laptop.url'
-@('[InternetShortcut]', "URL=$url") | Set-Content -LiteralPath $shortcut -Encoding Ascii
+. (Join-Path $PSScriptRoot 'Pos-App-Window.ps1')
+$browser = Get-PosAppBrowser
+if (-not $ShortcutDirectory -or -not (Test-Path -LiteralPath $ShortcutDirectory -PathType Container)) {
+    throw 'The shortcut folder was not found.'
+}
+$shortcut = Join-Path $ShortcutDirectory 'SQI POS Cashier.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$open = $shell.CreateShortcut($shortcut)
+$open.TargetPath = $browser
+$open.Arguments = "--app=$url --new-window"
+$open.WorkingDirectory = Split-Path $browser -Parent
+$open.Description = 'Open SQI POS in a dedicated app window on the second laptop'
+$open.Save()
 Write-Output "Created $shortcut"
-Write-Output 'Copy this file to the second laptop Desktop after installing the trusted certificate there.'
-Write-Output "The icon opens $url in the usual browser. It does not install another POS database."
+Write-Output "Double-click it to open $url without browser tabs or an address bar."
+Write-Output 'The POS server and database stay on the main laptop.'

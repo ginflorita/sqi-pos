@@ -1,0 +1,42 @@
+SQI POS app window
+==================
+
+Main laptop
+-----------
+Before updating, finish checkout and keep a verified copy of the data folder
+and latest backup on another drive. This version upgrades the existing
+database when the server next starts.
+1. Copy these update files into the existing SQI POS folder, keeping its data,
+   backups, certs, and printer settings. Allow Windows to replace matching
+   application files. The update does not include a database.
+2. Double-click the existing Start SQI POS desktop icon, or Open-POS.cmd in the
+   POS folder. It checks the running server against the copied files and
+   replaces an older SQI POS server automatically. It then opens the app.
+   Do this on the MAIN laptop; closing just the app window does not stop its
+   server. Avoid copying updates while cashiers are processing payments.
+3. The app window has no tabs or address bar. It uses the default Chrome or
+   Microsoft Edge profile on this Windows account.
+4. If the cashier laptop shows "SQI POS is updating", click Start SQI POS on
+   the main laptop. The cashier screen reconnects and reloads by itself.
+   The Choose quantity
+   and Set quantity dialogs include a clickable keypad on the right. The
+   sign-out icon asks for confirmation before ending the session. The sign-in
+   page shows the SQI logo and company name together above the form. Cashier
+   shifts now focuses on opening and closing shifts and their history.
+5. In Management > Events, only ginflorita can rename, end, archive, or start
+   an event. End the event after all days and shifts are closed. A verified
+   archive is required before starting the next event. Products remain; stock
+   starts at zero. The manager then opens Day 1.
+
+Second laptop
+-------------
+1. Extract this update ZIP into any folder on the second laptop. Install and
+   trust the main laptop's public pos.crt certificate as in docs/two-pc-setup.md.
+   Do not copy pos.key, the database, or backups to the second laptop.
+2. Double-click Create-Cashier-Shortcut.cmd in the extracted folder. Enter the
+   main laptop's current local IP address, without https:// or :8765.
+3. Double-click SQI POS Cashier on the second laptop desktop. It opens the
+   shared POS in a dedicated app window. Do not start another POS server there.
+
+The main laptop must remain on, signed in, and connected to the same trusted
+local network. The app window still needs the POS server at its HTTPS address.

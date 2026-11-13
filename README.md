@@ -1,6 +1,6 @@
 # SQI POS
 
-An offline browser POS for bazaars, with products, inventory, cash sales, acknowledgement receipts, and daily reporting. Two Windows PCs share one SQLite database through a local router. The offline Windows package includes Python and all application dependencies; checkout works over the local network.
+A local-network POS with products, inventory, cash sales, acknowledgement receipts, and daily reporting. Two Windows PCs share one SQLite database through a local router. The Start SQI POS icon opens a dedicated app window without browser tabs or an address bar.
 
 **Version:** 0.1 · **Server:** Python, Flask, Cheroot · **Database:** SQLite · **Interface:** HTML, CSS, JavaScript
 
@@ -13,15 +13,15 @@ An offline browser POS for bazaars, with products, inventory, cash sales, acknow
 | Checkout | Optional fullscreen with no sidebar, name/SKU/barcode search, a dedicated scanner or manual barcode field with quantity confirmation before adding, saved tickets, cashier selection from manager-set discount rates, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
 | Accounts | Named managers/cashiers, account-only sign-in, password confirmation for sensitive changes, and expiring sessions |
-| Bazaar days | Day 1, Day 2, etc., cashier shifts, opening/closing cash counts, and cash variance |
-| Corrections | Manager-approved returns/voids, refunds based on the amount paid after any discount, explicit restocking, and cash in/out |
+| Events, days, shifts | IT System Administrator starts and archives events; managers open and close days; cashiers open and close shifts. The next event keeps products but starts with zero stock. |
+| Corrections | Manager-approved returns/voids, refunds based on the amount paid after any discount, and explicit restocking |
 | Reports | Business-date span, day, product, category, and cashier filters, with a formatted Excel workbook export |
 | Audit and recovery | Append-only audit events, verified database backups, and restore into a new folder |
 
 ## Requirements
 
-- **Main PC:** Windows, Python 3.11 or later available through `python` or `py`, and a browser. Tested with Python 3.13.
-- **Second PC:** A browser connected to the same router as the main PC; Python and its printer driver are also needed for the optional local USB print helper. No second database or POS server.
+- **Main PC:** Windows, Python 3.11 or later available through `python` or `py`, and Chrome or Microsoft Edge. Tested with Python 3.13.
+- **Second PC:** Chrome or Microsoft Edge connected to the same router as the main PC; Python and its printer driver are also needed for the optional local USB print helper. No second database or POS server.
 - **Network:** Private Wi-Fi or Ethernet; LAN mode uses HTTPS.
 - **Storage:** Keep the live database on the main PC's internal drive and configure a separate backup destination.
 
@@ -45,13 +45,13 @@ cd sqi-pos
 .\Start-POS.cmd
 ```
 
-If you downloaded the offline Windows ZIP, skip the `git clone` and `cd sqi-pos` commands above, extract the complete ZIP, and double-click `Install-POS.cmd`. When Python is missing, the bundled official installer runs for the current Windows user. Installation creates `.venv` and uses the bundled dependency wheels without internet. Complete first-time setup with `Start-POS.cmd`. After the two-PC HTTPS setup, run `Setup-Host-Shortcut.cmd` once on the main laptop. It creates a **Start SQI POS** desktop icon and starts the server automatically when that Windows user signs in. The icon also starts the LAN HTTPS server if needed, waits until it is ready, and opens the browser. `Start-POS.cmd` remains available for manual troubleshooting.
+If you downloaded the offline Windows ZIP, skip the `git clone` and `cd sqi-pos` commands above, extract the complete ZIP, and double-click `Install-POS.cmd`. When Python is missing, the bundled official installer runs for the current Windows user. Installation creates `.venv` and uses the bundled dependency wheels without internet. Complete first-time setup with `Start-POS.cmd`. After the two-PC HTTPS setup, run `Setup-Host-Shortcut.cmd` once on the main laptop. It creates a **Start SQI POS** desktop icon and starts the server automatically when that Windows user signs in. The icon also starts the LAN HTTPS server if needed, waits until it is ready, and opens a dedicated Chrome or Edge app window. `Start-POS.cmd` remains available for manual troubleshooting.
 
 **Keeping existing records:** back up and stop the old server before moving its complete `data` folder to a new main laptop. Preserve `data`, `backups`, certificates, and print-helper configuration when updating application files. GitHub contains application code, not your live records.
 
 Open **http://localhost:8765** on the main PC. Keep the server running while either cashier is working.
 
-For the second laptop, complete the [two-PC HTTPS setup](docs/two-pc-setup.md), then run `Create-Cashier-Shortcut.cmd` on the main laptop with its reserved network address. Copy the resulting `SQI-POS-Second-Laptop.url` to the second laptop's desktop. Its cashier only double-clicks that icon and signs in. The second laptop runs no POS server and has no separate database. The main laptop must be signed in to Windows, awake, and connected to the router.
+For the second laptop, complete the [two-PC HTTPS setup](docs/two-pc-setup.md), extract a fresh copy of the application files there, and run `Create-Cashier-Shortcut.cmd` on that laptop with the main laptop's reserved network address. It creates a **SQI POS Cashier** desktop icon that opens the shared POS in an app window. Do not copy the main laptop's `data`, backups, or private `pos.key` file. The second laptop runs no POS server and has no separate database. The main laptop must be signed in to Windows, awake, and connected to the router.
 
 ### First-time setup
 
@@ -106,7 +106,7 @@ After an uncertain payment response, refresh the same browser to check the exist
 
 ### Sales report export
 
-In **Reports**, choose the date range and any day, cashier, category, or item filters, then click **Download Excel report**. The file is named `SQI-POS-(YYYY-MM-DD-to-YYYY-MM-DD).xlsx`. Its **Summary** sheet shows overall sales and daily net sales. **Days** shows receipts, units, gross sales, discounts, tax, refunds, and net sales by business day. **Items**, **Category**, and **Cashier** each have their own breakdown and totals. Refunds appear on the day they were processed and under the cashier who processed them. Sales exclude cash in/out and drawer variance; use **Cashier shifts** for cash reconciliation.
+In **Reports**, choose the date range and any day, cashier, category, or item filters, then click **Download Excel report**. The file is named `SQI-POS-Event-###-(YYYY-MM-DD-to-YYYY-MM-DD).xlsx`. Its **Summary** sheet shows overall sales and daily net sales. **Days** shows receipts, units, gross sales, discounts, tax, refunds, and net sales by business day. **Items**, **Category**, and **Cashier** each have their own breakdown and totals. Refunds appear on the day they were processed and under the cashier who processed them. Sales exclude cash in/out and drawer variance; use **Cashier shifts** for cash reconciliation.
 
 ### Barcode scanners and manual search
 

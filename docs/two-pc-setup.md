@@ -2,13 +2,13 @@
 
 Saved: 2026-10-20 (Asia/Taipei).
 
-The main PC runs the POS and stores the single shared database. The second PC opens it in a browser. Each laptop also runs its own print helper if automatic USB printing is enabled.
+The main PC runs the POS and stores the single shared database. Each PC can open it in a dedicated Chrome or Edge app window without tabs or an address bar. Each laptop also runs its own print helper if automatic USB printing is enabled.
 
 | Component | Main laptop | Second laptop |
 | --- | --- | --- |
 | POS server and application dependencies | Install here | Not needed |
 | SQLite database | Stored in `data/pos.sqlite3` here | Do not install or copy a separate database |
-| Browser | Required | Required |
+| Chrome or Microsoft Edge | Required for the app window | Required for the app window |
 | Python | Required; tested with 3.13 | Required only for the print helper |
 | USB printer driver and print helper | For this laptop's printer | For this laptop's printer |
 
@@ -61,7 +61,7 @@ On each PC, inspect the certificate and compare its SHA256 fingerprint with the 
 
 **Install Certificate → Current User → Place all certificates in the following store → Trusted Root Certification Authorities → Finish**
 
-Install it under the Windows account that will use the browser. Resolve certificate warnings before entering cashier credentials.
+Install it under the Windows account that will use the app window. Resolve certificate warnings before entering cashier credentials.
 
 ## 4. Start the POS in network mode
 
@@ -72,7 +72,7 @@ cd "C:\SQI-POS"
 .\Start-POS.cmd --lan --cert certs/pos.crt --key certs/pos.key
 ```
 
-Keep the server running while either PC uses the POS. After verifying HTTPS, stop the manual server with **Ctrl+C**, then double-click **Setup-Host-Shortcut.cmd** once on the main laptop. It creates a **Start SQI POS** desktop icon and a Windows sign-in startup shortcut for the server. The icon starts LAN HTTPS automatically when `certs/pos.crt` and `certs/pos.key` are present, then opens the browser.
+Keep the server running while either PC uses the POS. After verifying HTTPS, stop the manual server with **Ctrl+C**, then double-click **Setup-Host-Shortcut.cmd** once on the main laptop. It creates a **Start SQI POS** desktop icon and a Windows sign-in startup shortcut for the server. The icon starts LAN HTTPS automatically when `certs/pos.crt` and `certs/pos.key` are present, then opens the POS app window.
 
 ## 5. Allow the local connection through Windows Firewall
 
@@ -80,16 +80,16 @@ On the main PC, have the owner allow inbound **TCP port 8765** for the **Private
 
 The application does not automatically change firewall or certificate trust settings.
 
-## 6. Open the POS in each browser
+## 6. Open the POS app window
 
-| Device | Browser address |
+| Device | Address used by the app window |
 | --- | --- |
 | Main PC | `https://localhost:8765` |
 | Second PC | `https://192.168.1.115:8765` |
 
-Use the main PC's actual network address on the second PC. `localhost` always refers to the PC using that browser. Keep a consistent browser address for pending-payment recovery.
+Use the main PC's actual network address on the second PC. `localhost` always refers to the PC using that window. Keep a consistent address and browser profile for pending-payment recovery. The dedicated window uses the default Chrome or Edge profile, so it retains that profile's sign-in and saved ticket state. If a shift is open in another browser profile, close and reconcile that shift before opening a new one.
 
-On the main laptop, double-click **Create-Cashier-Shortcut.cmd** and enter its reserved IP address (without `https://`). Copy the generated `SQI-POS-Second-Laptop.url` file from the project folder to the second laptop's desktop. The cashier then double-clicks that icon to open the usual browser. This is a browser shortcut; do not run another POS server on the second laptop.
+On the second laptop, extract a fresh copy of the application files. Do not copy the main laptop's `data` folder, backups, or private `certs/pos.key`. Double-click **Create-Cashier-Shortcut.cmd** there and enter the main laptop's reserved IP address (without `https://`). It creates **SQI POS Cashier** on that laptop's desktop. Double-click that icon to open the shared POS without browser tabs or an address bar. Do not run `Start-POS.cmd` on the second laptop.
 
 If setup is incomplete, create the manager account on the main PC. When switching from HTTP to HTTPS, sign out and back in to refresh the authentication cookies for HTTPS.
 
@@ -116,12 +116,12 @@ The second laptop can use a downloaded copy of the application source for the he
 1. Connect both laptops to the same router.
 2. Sign in to Windows on the main laptop. The startup shortcut starts the server automatically; its desktop **Start SQI POS** icon also starts it if needed. Keep the laptop awake and plugged in.
 3. If using automatic printing, run `Start-Print-Helper.cmd` on each laptop.
-4. Double-click **Start SQI POS** on the main laptop and the **SQI POS** browser shortcut on the second laptop. Sign in, open the business day, and open each cashier's shift.
+4. Double-click **Start SQI POS** on the main laptop and **SQI POS Cashier** on the second laptop. Sign in, open the business day, and open each cashier's shift.
 5. At closing, finish orders, reconcile and close shifts, close the business day, and verify the backup. Keep an additional recovery copy on a separate drive.
 
 ## Updating application files later
 
-Back up first and stop the server before replacing application files. Preserve the existing `data`, `backups`, `certs` (or your certificate folder), and `.print-helper` folders. Do not replace them with empty folders from a new download. If application dependencies change, run `Install-POS.cmd` again on the main laptop, then restart the usual LAN command. The second laptop still uses the main laptop's single database.
+Back up first and finish all payments before replacing application files. Preserve the existing `data`, `backups`, `certs` (or your certificate folder), and `.print-helper` folders. Do not replace them with empty folders from a new download. After copying the update, double-click **Start SQI POS** on the main laptop. It detects and replaces its older running server; closing only the app window does not stop that server. The second laptop reconnects and reloads when the new server is ready. If application dependencies change, run `Install-POS.cmd` again on the main laptop before starting. The second laptop still uses the main laptop's single database.
 
 ## Keep the host address consistent
 

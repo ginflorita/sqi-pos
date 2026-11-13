@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS discount_rates (
 CREATE TABLE IF NOT EXISTS bazaars (
  bazaar_id INTEGER PRIMARY KEY, name TEXT NOT NULL, starts_on TEXT NOT NULL, ends_on TEXT,
  timezone TEXT NOT NULL, currency_code TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','closed')),
- created_by_user_id INTEGER NOT NULL REFERENCES users(user_id), created_at TEXT NOT NULL
+ created_by_user_id INTEGER NOT NULL REFERENCES users(user_id), created_at TEXT NOT NULL,
+ event_name TEXT NOT NULL DEFAULT 'Event 1', archive_backup TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_bazaar ON bazaars(status) WHERE status='active';
 CREATE TABLE IF NOT EXISTS bazaar_days (
@@ -177,7 +178,8 @@ CREATE TABLE IF NOT EXISTS receipt_events (
 CREATE TABLE IF NOT EXISTS audit_events (
  audit_event_id INTEGER PRIMARY KEY, bazaar_day_id INTEGER REFERENCES bazaar_days(bazaar_day_id), actor_user_id INTEGER REFERENCES users(user_id),
  terminal_id INTEGER REFERENCES terminals(terminal_id), attempted_username TEXT, action TEXT NOT NULL, entity_type TEXT NOT NULL,
- entity_key TEXT, before_json TEXT, after_json TEXT, reason TEXT, approved_by_user_id INTEGER REFERENCES users(user_id), created_at TEXT NOT NULL
+ entity_key TEXT, before_json TEXT, after_json TEXT, reason TEXT, approved_by_user_id INTEGER REFERENCES users(user_id), created_at TEXT NOT NULL,
+ bazaar_id INTEGER REFERENCES bazaars(bazaar_id)
 );
 CREATE TABLE IF NOT EXISTS backup_runs (
  backup_run_id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL CHECK(status IN ('running','verified','failed')),
@@ -236,4 +238,4 @@ CREATE TABLE IF NOT EXISTS receipt_print_jobs (
  created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT, error_message TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_automatic_print_per_sale ON receipt_print_jobs(sale_id) WHERE job_kind='automatic';
-PRAGMA user_version=9;
+PRAGMA user_version=10;

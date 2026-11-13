@@ -6,6 +6,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $runFile = Join-Path $root 'run.py'
 $healthCheck = Join-Path $PSScriptRoot 'check_pos.py'
+. (Join-Path $PSScriptRoot 'Pos-App-Window.ps1')
 $runtime = Join-Path $root '.runtime'
 $cert = Join-Path $root 'certs\pos.crt'
 $key = Join-Path $root 'certs\pos.key'
@@ -15,6 +16,31 @@ function Test-Pos([bool]$secure) {
     if ($secure) { & $python $healthCheck --cert $cert 2>$null }
     else { & $python $healthCheck 2>$null }
     return $LASTEXITCODE -eq 0
+}
+
+function Get-PosBuildStatus([bool]$secure) {
+    if ($secure) { & $python $healthCheck --cert $cert --check-build 2>$null }
+    else { & $python $healthCheck --check-build 2>$null }
+    return $LASTEXITCODE
+}
+
+function Stop-OutdatedPos([bool]$secure) {
+    if (-not (Test-Pos $secure)) { throw 'The server on port 8765 could not be identified as SQI POS. Ask the main laptop owner to check it.' }
+    $owners = @(netstat -ano -p tcp | ForEach-Object {
+        if ($_ -match '^\s*TCP\s+\S+:8765\s+\S+\s+LISTENING\s+(\d+)\s*$') { [int]$Matches[1] }
+    } | Sort-Object -Unique)
+    if ($owners.Count -ne 1) { throw 'Could not identify the older SQI POS server on port 8765. Close its black server window, then click Start SQI POS.' }
+    $ownerProcess = Get-Process -Id $owners[0] -ErrorAction Stop
+    if ($ownerProcess.ProcessName -notin @('python', 'pythonw')) {
+        throw 'Another program owns port 8765. Ask the main laptop owner to check it.'
+    }
+    Write-Output 'Applying the SQI POS update. Please wait...'
+    Stop-Process -Id $owners[0] -Force -ErrorAction Stop
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (-not (Test-Port)) { return }
+        Start-Sleep -Milliseconds 500
+    }
+    throw 'The old SQI POS server did not release port 8765. Close its black server window, then click Start SQI POS.'
 }
 
 function Test-Port {
@@ -35,15 +61,28 @@ if ($hasCert -xor $hasKey) {
 }
 $lan = $hasCert -and $hasKey
 $url = $null
-if ($lan -and (Test-Pos $true)) { $url = $httpsUrl }
-elseif (-not $lan -and (Test-Pos $false)) { $url = $httpUrl }
+$serverHealthy = Test-Pos $lan
+if ($serverHealthy) {
+    $buildStatus = Get-PosBuildStatus $lan
+    if ($buildStatus -eq 0) { $url = if ($lan) { $httpsUrl } else { $httpUrl } }
+    elseif ($buildStatus -eq 2) { Stop-OutdatedPos $lan }
+    else { throw 'SQI POS answered, but its version could not be checked. Close its black server window, then click Start SQI POS.' }
+}
+
+# A former single-laptop HTTP server can still occupy the port after HTTPS is enabled.
+if (-not $url -and $lan -and (Test-Port) -and (Test-Pos $false)) {
+    Stop-OutdatedPos $false
+}
 
 if (-not $url -and (Test-Port)) {
     if (-not $ServerOnly) { Write-Output 'The POS server is starting or busy. Waiting for it to respond...' }
     for ($attempt = 0; $attempt -lt 6; $attempt++) {
         Start-Sleep -Seconds 1
         if (Test-Pos $lan) {
-            $url = if ($lan) { $httpsUrl } else { $httpUrl }
+            $buildStatus = Get-PosBuildStatus $lan
+            if ($buildStatus -eq 0) { $url = if ($lan) { $httpsUrl } else { $httpUrl } }
+            elseif ($buildStatus -eq 2) { Stop-OutdatedPos $lan }
+            else { throw 'SQI POS answered, but its version could not be checked. Close its black server window, then click Start SQI POS.' }
             break
         }
     }
@@ -84,7 +123,7 @@ if (-not $url) {
 }
 
 if (-not $ServerOnly) {
-    Start-Process $url
+    Start-PosAppWindow $url
 }
 Write-Output "SQI POS is ready: $url"
 } catch {

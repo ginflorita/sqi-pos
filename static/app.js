@@ -32,7 +32,7 @@ const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toStr
 const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:location.hash.slice(1)||'reports',products:[],productDrafts:[],categories:[],ticket:null,cart:[],search:'',category:'all',productPage:0,filters:{},online:true,paying:false,cartError:false,receiptPrinter:null};
 const managerAccess=()=>['manager','it_admin'].includes(S.user?.role);
 const roleLabel=user=>({it_admin:'IT System Administrator',manager:'Manager',cashier:'Cashier'})[user?.role]||'Unknown';
-let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, catalogPollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, shiftConfirmationCancel=null, pendingProductImport=null, managementOpen=false, backupPage=0, shiftHistoryPage=1;
+let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, catalogPollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, shiftConfirmationCancel=null, pendingProductImport=null, managementOpen=false, backupPage=0, shiftHistoryPage=1, transactionPage=1, transactionSearch='', catalogSearch='', catalogDraftPage=1, catalogProductPage=1, reportEventId=null, auditEventId=null, inventoryEventId=null, archiveEventName='', bootRetryTimer=null;
 const inventoryFilters={q:'',category_id:'',from:'',to:'',view:'products',product_page:1,movement_page:1};
 let inventoryRenderId=0;
 async function api(path, method='GET', data, isForm=false){
@@ -43,7 +43,7 @@ async function api(path, method='GET', data, isForm=false){
   let result;try{result=await response.json();}catch{result={error:response.status===404
     ? 'This feature is not available in the running server. Restart SQI POS and try again.'
     : 'The server returned an unexpected response. Refresh the page and try again.'};}
-  if(!response.ok){if(response.status===401&&S.user){S.user=null;renderAuth(false);}const error=new Error(result.error||'The request could not be completed.');error.status=response.status;throw error;}
+  if(!response.ok){if(response.status===401&&S.user){S.user=null;renderAuth(false);}const error=new Error(result.error||'The request could not be completed.');error.status=response.status;if(response.status===404&&(!response.headers.get('content-type')?.includes('application/json')||path==='/server-info'))error.code='update';throw error;}
   return result;
 }
 function toast(message,error=false){const t=$('#toast');t.textContent=message;t.className='show'+(error?' error':'');clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.className='',6000);}
@@ -58,6 +58,17 @@ function pill(text,style='success'){return `<span class="pill ${style}"><span cl
 function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>${e(title)}</h1><p>${e(description)}</p></div><div class="actions">${actions}</div></div>`;}
 function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();if(shiftConfirmationCancel)shiftConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
 function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}if(shiftConfirmationCancel){shiftConfirmationCancel();return;}const wasQuantity=['Choose quantity','Set quantity'].includes($('#modal-title')?.textContent);$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;if(wasQuantity&&S.page==='checkout'){const search=$('#product-search');search?.focus({preventScroll:true});search?.select();}}
+function confirmLogout(){
+  if(!S.user||S.paying||$('.modal'))return;
+  modal('Sign out?',`<p>Sign out of ${e(S.user.display_name)}?</p>${S.shift?'<p class="muted signout-note">Your cashier shift and any unpaid order will stay open. Close them first if you are done selling.</p>':''}<div class="modal-actions">${button('Stay signed in','close-modal','light')}${button('Sign out','confirm-logout','green','logout')}</div>`);
+}
+async function signOut(){
+  await cartQueue;
+  await api('/logout','POST',{});
+  S.ticket=null;S.cart=[];S.page='reports';
+  history.replaceState(null,'',`${location.pathname}${location.search}`);
+  await boot();
+}
 function formModal(title,body,onSubmit,submit='Save',wide=false){modal(title,`<form id="modal-form" class="form-grid">${body}<div class="form-error" role="alert"></div><div class="modal-actions">${button('Cancel','close-modal','light')}<button type="submit" class="btn green">${submit}${icon('arrow')}</button></div></form>`,wide);$('#modal-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const submitButton=$('[type=submit]',form);if(submitButton.disabled)return;submitButton.disabled=true;$('.form-error',form).textContent='';try{await onSubmit(Object.fromEntries(new FormData(form)),form);}catch(error){$('.form-error',form).textContent=error.message;}finally{submitButton.disabled=false;}});}
 async function refreshState(){const data=await api('/state');Object.assign(S,data);return data;}
 async function loadCatalog(){const data=await api('/catalog');S.products=data.products;S.productDrafts=data.drafts||[];S.categories=data.categories;}
@@ -80,28 +91,41 @@ function renderAuth(setup){
   if(paymentConfirmationCancel)paymentConfirmationCancel();
   void exitCheckoutFullscreen();
   $('#modal-root').innerHTML='';
-  $('#app').innerHTML=`<div class="auth"><aside class="auth-story"><div class="brand auth-brand"><img src="/static/sqi-logo.png" alt="SQI company logo"><span>SQI Group Int'l Corp<small>Philippines</small></span></div><div class="auth-title"><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>Your counter.<br><em>Ready for business.</em></h1><p>Products, stock, sales, and receipts in one place for your team.</p></div><div class="auth-foot"><span class="dot"></span>Made for your local network. Ready without internet.</div><div class="auth-circle"></div></aside><main class="auth-form"><div class="eyebrow">${setup?'LET’S SET UP YOUR COUNTER':'WELCOME BACK'}</div><h2>${setup?'Set up your SQI counter.':'Your counter is waiting.'}</h2><p>${setup?'Create the manager account on this host laptop. You can add your second cashier after setup.':'Sign in with your own account to open your shift.'}</p><form id="auth-form" class="form-grid">${setup?field('Your name','display_name','text','','required autocomplete="name"')+field('Business name','bazaar_name','text',"SQI Group Int'l Corp - Philippines",'required maxlength="120"'):''}${field('Username','username','text','','required autocomplete="username" minlength="3" maxlength="50"')}${field('Password','password','password','','required autocomplete="'+(setup?'new-password':'current-password')+'" '+(setup?'minlength="12"':''))}${setup?selectField('Currency','currency_code',[['PHP','PHP · Philippine peso'],['USD','USD · US dollar'],['TWD','TWD · Taiwan dollar'],['SGD','SGD · Singapore dollar'],['EUR','EUR · Euro'],['GBP','GBP · British pound'],['MYR','MYR · Malaysian ringgit'],['THB','THB · Thai baht'],['HKD','HKD · Hong Kong dollar'],['AUD','AUD · Australian dollar']],'PHP')+field('Business timezone','timezone','text','Asia/Manila','required'):''}<div class="form-error" role="alert"></div><div class="field full"><button class="btn green" type="submit">${setup?'Create my counter':'Sign in'}${icon('arrow')}</button></div></form><div class="auth-note">${setup?'Use at least 12 characters for your password. Currency and timezone apply to this counter.':'Each sale stays connected to the person who made it.'}</div></main></div>`;
+  $('#app').innerHTML=`<div class="auth auth-login"><header class="auth-login-brand"><img src="/static/sqi-logo.png" alt="SQI logo"><strong>SQI Group Int'l Corp Philippines</strong></header><main class="auth-form"><div class="eyebrow">${setup?'LET’S SET UP YOUR COUNTER':'WELCOME BACK'}</div><h2>${setup?'Set up your SQI counter.':'Your counter is waiting.'}</h2><p>${setup?'Create the manager account on this host laptop. You can add your second cashier after setup.':'Sign in with your own account to open your shift.'}</p><form id="auth-form" class="form-grid">${setup?field('Your name','display_name','text','','required autocomplete="name"')+field('Business name','bazaar_name','text',"SQI Group Int'l Corp - Philippines",'required maxlength="120"'):''}${field('Username','username','text','','required autocomplete="username" minlength="3" maxlength="50"')}${field('Password','password','password','','required autocomplete="'+(setup?'new-password':'current-password')+'" '+(setup?'minlength="12"':''))}${setup?selectField('Currency','currency_code',[['PHP','PHP · Philippine peso'],['USD','USD · US dollar'],['TWD','TWD · Taiwan dollar'],['SGD','SGD · Singapore dollar'],['EUR','EUR · Euro'],['GBP','GBP · British pound'],['MYR','MYR · Malaysian ringgit'],['THB','THB · Thai baht'],['HKD','HKD · Hong Kong dollar'],['AUD','AUD · Australian dollar']],'PHP')+field('Business timezone','timezone','text','Asia/Manila','required'):''}<div class="form-error" role="alert"></div><div class="field full"><button class="btn green" type="submit">${setup?'Create my counter':'Sign in'}${icon('arrow')}</button></div></form>${setup?'<div class="auth-note">Use at least 12 characters for your password. Currency and timezone apply to this counter.</div>':''}</main><footer class="auth-footer">www.sqigroup.ph | 2027</footer></div>`;
   $('#auth-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const b=$('[type=submit]',form);b.disabled=true;$('.form-error',form).textContent='';try{await api(setup?'/setup':'/login','POST',Object.fromEntries(new FormData(form)));await boot();}catch(error){$('.form-error',form).textContent=error.message;}finally{b.disabled=false;}});
 }
-const nav=[['checkout','cart','Checkout'],['catalog','grid','Products'],['inventory','box','Inventory'],['transactions','receipt','Transactions'],['reports','chart','Reports'],['shifts','clock','Cashier shifts'],['team','users','Team'],['audit','shield','Audit trail'],['management','settings','Business day'],['discounts','chart','Discounts'],['backups','download','Backups'],['printer','print','Printer']];
-const managementPages=new Set(['management','discounts','backups','printer']);
+const nav=[['checkout','cart','Checkout'],['catalog','grid','Products'],['inventory','box','Inventory'],['transactions','receipt','Transactions'],['reports','chart','Reports'],['shifts','clock','Cashier shifts'],['team','users','Team'],['audit','shield','Audit trail'],['management','settings','Business day'],['events','sun','Events'],['discounts','chart','Discounts'],['backups','download','Backups'],['printer','print','Printer']];
+const managementPages=new Set(['management','events','discounts','backups','printer']);
 function shell(){
   const allowed=nav.filter(([id])=>!managementPages.has(id)&&(managerAccess()||['checkout','transactions','shifts'].includes(id)));
   const initials=S.user.display_name.split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
   managementOpen=managementPages.has(S.page);
-  const managementNav=managerAccess()?`<div class="nav-management"><button id="management-toggle" type="button" class="${managementOpen?'group-active':''}" data-action="toggle-management" aria-expanded="${managementOpen}" aria-controls="management-subnav" title="Management">${icon('settings')}<span>Management</span>${icon('down')}</button><div class="nav-submenu" id="management-subnav" ${managementOpen?'':'hidden'}>${nav.filter(([id])=>managementPages.has(id)).map(([id,i,label])=>`<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}</div></div>`:'';
-  $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand company-brand"><img src="/static/sqi-logo.png" alt="SQI company logo" width="5442" height="3064"><span class="company-brand-name">SQI Group Int'l Corp<small>Philippines</small></span></div><div class="nav-label">WORKSPACE</div><nav class="nav">${allowed.map(([id,i,label],index)=>`${index===5?'<div class="nav-gap"></div>':''}<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}${managementNav}</nav><div class="side-foot"><div class="local-status" id="connection-state"><span class="dot"></span>Local server connected</div><div class="side-user"><div class="avatar">${e(initials)}</div><div><strong>${e(S.user.display_name)}</strong><small>${e(roleLabel(S.user))}</small></div><button class="icon-btn" title="Sign out" aria-label="Sign out" data-action="logout">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">SQI Group <span>/</span><b id="page-name">Checkout</b></div><div class="top-right"><span class="date-label">${new Intl.DateTimeFormat('en',{timeZone:S.bazaar.timezone,month:'short',day:'numeric',year:'numeric'}).format(new Date())}</span>${pill(S.day?'Day '+S.day.day_number+' is open':'Day closed',S.day?'success':'warn')}<div class="avatar">${e(initials)}</div></div></header><div id="connection-banner" class="connection-banner" hidden></div><div id="page" class="page"></div></main></div>`;
+  const managementNav=managerAccess()?`<div class="nav-management"><button id="management-toggle" type="button" class="${managementOpen?'group-active':''}" data-action="toggle-management" aria-expanded="${managementOpen}" aria-controls="management-subnav" title="Management">${icon('settings')}<span>Management</span>${icon('down')}</button><div class="nav-submenu" id="management-subnav" ${managementOpen?'':'hidden'}>${nav.filter(([id])=>managementPages.has(id)&&(id!=='events'||S.user.role==='it_admin')).map(([id,i,label])=>`<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}</div></div>`:'';
+  $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand company-brand"><img src="/static/sqi-logo.png" alt="SQI company logo" width="5442" height="3064"><span class="company-brand-name">SQI Group Int'l Corp<small>Philippines</small></span></div><div class="nav-label">WORKSPACE</div><nav class="nav">${allowed.map(([id,i,label],index)=>`${index===5?'<div class="nav-gap"></div>':''}<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}${managementNav}</nav><div class="side-foot"><div class="local-status" id="connection-state"><span class="dot"></span>Local server connected</div><div class="side-user"><div class="avatar">${e(initials)}</div><div><strong>${e(S.user.display_name)}</strong><small>${e(roleLabel(S.user))}</small></div><button class="icon-btn" title="Sign out" aria-label="Sign out" data-action="logout">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">SQI Group <span>/</span><b id="page-name">Checkout</b></div><div class="top-right"><span class="date-label">${new Intl.DateTimeFormat('en',{timeZone:S.bazaar?.timezone||'Asia/Manila',month:'short',day:'numeric',year:'numeric'}).format(new Date())}</span>${pill(S.bazaar?(S.day?'Day '+S.day.day_number+' is open':'Day closed'):'No event open',S.day?'success':'warn')}<div class="avatar">${e(initials)}</div></div></header><div id="connection-banner" class="connection-banner" hidden></div><div id="page" class="page"></div></main></div>`;
 }
 function renderBootError(error){
+  clearTimeout(bootRetryTimer);
+  if(error.code==='update'){
+    const local=['localhost','127.0.0.1'].includes(location.hostname);
+    $('#app').innerHTML=`<main class="boot-error" role="alert"><h1>SQI POS is updating</h1><p>The app files are newer than the server currently running on the main laptop.</p><p>${local?'On this laptop, double-click <strong>Start SQI POS</strong>.':'Ask the person at the main laptop to double-click <strong>Start SQI POS</strong>.'} This screen will reconnect by itself.</p><button type="button" class="btn green" id="retry-boot">Check again</button></main>`;
+    $('#retry-boot').addEventListener('click',()=>location.reload());
+    const checkAgain=async()=>{
+      try{const response=await fetch('/api/server-info',{cache:'no-store'});if(response.ok){const info=await response.json();if(!info.restart_needed){location.reload();return;}}}catch{}
+      bootRetryTimer=setTimeout(checkAgain,4000);
+    };
+    bootRetryTimer=setTimeout(checkAgain,4000);
+    return;
+  }
   const detail=error.status===503
     ? 'The database is busy. If DB Browser for SQLite is open, resolve its pending changes and close the database, then retry.'
     : 'Check that the local server is running, then retry.';
   $('#app').innerHTML=`<main class="boot-error" role="alert"><h1>Unable to open your counter</h1><p>${e(error.message)}</p><p>${detail}</p><button type="button" class="btn green" id="retry-boot">Try again</button></main>`;
   $('#retry-boot').addEventListener('click',boot,{once:true});
 }
-async function boot(){try{await cartQueue;await refreshState();if(!S.user)return renderAuth(S.setup_required);if(!nav.some(([id])=>id===S.page))S.page='reports';if(!managerAccess()&&!['checkout','transactions','shifts'].includes(S.page))S.page='checkout';await loadCatalog();shell();await navigate(S.page);}catch(error){renderBootError(error);}}
+async function boot(){try{clearTimeout(bootRetryTimer);await cartQueue;const server=await api('/server-info');if(server.restart_needed){const error=new Error('The POS server needs to restart to finish this update.');error.code='update';throw error;}await refreshState();if(!S.user)return renderAuth(S.setup_required);if(!nav.some(([id])=>id===S.page))S.page='reports';if(!managerAccess()&&!['checkout','transactions','shifts'].includes(S.page))S.page='checkout';if(S.page==='events'&&S.user.role!=='it_admin')S.page='reports';await loadCatalog();shell();await navigate(S.page);}catch(error){renderBootError(error);}}
 async function navigate(page){
   if(page==='settings')page='management';
+  if(page==='inventory'&&!S.bazaar&&!inventoryEventId){await navigate(S.user.role==='it_admin'?'events':'management');toast('Start an event to track its inventory.',true);return;}
   if(page==='checkout'&&(!S.day||!S.shift)){
     await navigate(managerAccess()?'reports':'transactions');
     return checkoutStartPrompt();
@@ -113,8 +137,8 @@ async function navigate(page){
   const submenu=$('#management-subnav'),toggle=$('#management-toggle');
   if(submenu)submenu.hidden=!managementOpen;
   if(toggle){toggle.setAttribute('aria-expanded',String(managementOpen));toggle.classList.toggle('group-active',managementPages.has(page));}
-  const renderers={checkout:renderCheckout,catalog:renderCatalog,inventory:renderInventory,transactions:renderTransactions,reports:renderReports,shifts:renderShifts,team:renderTeam,audit:renderAudit,management:renderManagement,discounts:renderDiscounts,backups:renderBackups,printer:renderPrinter};
-  try{await renderers[page]();}catch(error){toast(error.message,true);$('#page').innerHTML=empty('Unable to open this page',error.message);}
+  const renderers={checkout:renderCheckout,catalog:renderCatalog,inventory:renderInventory,transactions:renderTransactions,reports:renderReports,shifts:renderShifts,team:renderTeam,audit:renderAudit,management:renderManagement,events:renderEvents,discounts:renderDiscounts,backups:renderBackups,printer:renderPrinter};
+  try{await renderers[page]();}catch(error){if(error.code==='update'){renderBootError(error);return;}toast(error.message,true);$('#page').innerHTML=empty('Unable to open this page',error.message);}
 }
 function toggleManagement(){
   managementOpen=!managementOpen;
@@ -149,6 +173,10 @@ function checkoutModePrompt(){
 }
 function checkoutStartPrompt(){
   if($('.modal')||S.paying)return;
+  if(!S.bazaar){
+    modal('No event is open',`<p>${S.user.role==='it_admin'?'Start the next event in Events, then a manager can open its first business day.':'Ask the IT System Administrator to start the next event. A manager can then open the business day.'}</p><div class="modal-actions">${button('OK','close-modal','green')}${S.user.role==='it_admin'?button('Go to Events','go-to-events','light','sun'):''}</div>`);
+    return;
+  }
   if(!S.day){
     if(managerAccess())return openDay(true);
     modal('Checkout is closed',`<p>The business day has not been started. Ask the system manager to start the day before you open your shift or make a sale.</p><div class="modal-actions">${button('OK','close-modal','green')}</div>`);
@@ -295,6 +323,28 @@ function viewCartDescription(pid){
   requireClient(product,'Product details are unavailable. Refresh the counter.');
   modal('Product description',`<p class="description-sku">SKU: ${e(product.sku)}</p><div class="product-description-text">${e(product.description)}</div><p class="description-price">${money(product.amount_minor)} / ${e(product.unit)}</p><div class="modal-actions">${button('Close','close-modal','light')}</div>`);
 }
+function quantityKeypad(){
+  return `<div class="quantity-keypad" role="group" aria-label="On-screen quantity keypad"><strong>Tap a quantity</strong>${['1','2','3','4','5','6','7','8','9','Clear','0','⌫'].map(value=>`<button type="button" data-quantity-key="${value}" aria-label="${value==='⌫'?'Delete last digit':value==='Clear'?'Clear quantity':value}">${value}</button>`).join('')}</div>`;
+}
+function wireQuantityKeypad(form,quantityInput){
+  let replaceNextDigit=true;
+  quantityInput.addEventListener('input',()=>{replaceNextDigit=false;});
+  $('.quantity-keypad',form).addEventListener('click',ev=>{
+    const key=ev.target.closest('[data-quantity-key]');
+    if(!key)return;
+    const value=key.dataset.quantityKey;
+    if(value==='Clear')quantityInput.value='';
+    else if(value==='⌫')quantityInput.value=quantityInput.value.slice(0,-1);
+    else{
+      const next=replaceNextDigit||quantityInput.value==='0'?value:quantityInput.value+value;
+      if(next.length>7)return;
+      quantityInput.value=next;
+    }
+    replaceNextDigit=false;
+    quantityInput.dispatchEvent(new Event('input',{bubbles:true}));
+    quantityInput.focus({preventScroll:true});
+  });
+}
 async function productQuantityModal(pid){
   if(quantityDialogOpening||$('.modal')||S.paying)return;
   quantityDialogOpening=true;
@@ -308,7 +358,7 @@ async function productQuantityModal(pid){
     const available=product.quantity_on_hand-existing;
     requireClient(available>0,'All available stock for this item is already in the order.');
     const details=`<div class="quantity-product field full"><div class="cart-thumb">${productVisual(product)}</div><div class="quantity-product-price"><small>Unit price</small><strong>${money(product.amount_minor)} / ${e(product.unit)}</strong></div></div><div class="quantity-product-identifiers field full"><div><span>SKU</span><strong>${e(product.sku)}</strong></div><div><span>Barcode</span><strong>${e(product.barcode||'Not assigned')}</strong></div></div><div class="quantity-product-description field full"><span>Description</span><p>${e(product.description)}</p></div>`;
-    formModal('Choose quantity',details+`<div class="field full"><small>Available to add: ${available} ${e(product.unit)}.${existing?' Already in order: '+existing+' '+e(product.unit)+'.':''} Nothing is added until you confirm.</small></div>`+field('Quantity to add','quantity','number','1',`required min="1" max="${available}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>Amount to add</span><strong id="quantity-add-total">${money(product.amount_minor)}</strong></div>`,async data=>{
+    formModal('Choose quantity',`<div class="quantity-main">${details}<div class="field full"><small>Available to add: ${available} ${e(product.unit)}.${existing?' Already in order: '+existing+' '+e(product.unit)+'.':''} Nothing is added until you confirm.</small></div>`+field('Quantity to add','quantity','number','1',`required min="1" max="${available}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>Amount to add</span><strong id="quantity-add-total">${money(product.amount_minor)}</strong></div></div>`+quantityKeypad(),async data=>{
       const quantity=Number(data.quantity);
       requireClient(Number.isSafeInteger(quantity)&&quantity>=1,'Enter a whole quantity of at least 1.');
       requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
@@ -320,8 +370,10 @@ async function productQuantityModal(pid){
       await addProduct(pid,quantity);
       requireClient(!S.cartError,'The order could not be saved. Refresh the counter before trying again.');
       closeModal();renderProducts();toast(quantity+' × '+product.description+' added to the order.');
-    },'Add to order');
+    },'Add to order',true);
     const form=$('#modal-form'),quantityInput=$('[name=quantity]',form),confirmButton=$('[type=submit]',form);
+    form.classList.add('quantity-modal-form');
+    wireQuantityKeypad(form,quantityInput);
     confirmButton.disabled=true;
     setTimeout(()=>{if(form.isConnected)confirmButton.disabled=false;},250);
     quantityInput.addEventListener('input',()=>{
@@ -342,7 +394,7 @@ async function setCartQuantityModal(pid){
     requireClient(product&&existing>0,'This item is no longer in the order. Refresh the counter.');
     const max=Math.min(product.quantity_on_hand,1_000_000);
     const details=`<div class="quantity-product field full"><div class="cart-thumb">${productVisual(product)}</div><div class="quantity-product-price"><small>Unit price</small><strong>${money(product.amount_minor)} / ${e(product.unit)}</strong></div></div><div class="quantity-product-identifiers field full"><div><span>SKU</span><strong>${e(product.sku)}</strong></div><div><span>Barcode</span><strong>${e(product.barcode||'Not assigned')}</strong></div></div><div class="quantity-product-description field full"><span>Description</span><p>${e(product.description)}</p></div>`;
-    formModal('Set quantity',details+`<div class="field full"><small>Set the total quantity for this item, not the amount to add. Current total: ${existing}. Available stock: ${max}. Enter 0 to remove it.</small></div>`+field('Total quantity in order','quantity','number',existing,`required min="0" max="${max}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>New line total</span><strong id="quantity-set-total">${money(product.amount_minor*existing)}</strong></div>`,async data=>{
+    formModal('Set quantity',`<div class="quantity-main">${details}<div class="field full"><small>Set the total quantity for this item, not the amount to add. Current total: ${existing}. Available stock: ${max}. Enter 0 to remove it.</small></div>`+field('Total quantity in order','quantity','number',existing,`required min="0" max="${max}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>New line total</span><strong id="quantity-set-total">${money(product.amount_minor*existing)}</strong></div></div>`+quantityKeypad(),async data=>{
       const quantity=Number(data.quantity);
       requireClient(Number.isSafeInteger(quantity)&&quantity>=0,'Enter a whole quantity of 0 or more.');
       await cartQueue;
@@ -356,8 +408,10 @@ async function setCartQuantityModal(pid){
       if(quantity!==inOrder)await addProduct(pid,quantity-inOrder);
       requireClient(!S.cartError,'The order could not be saved. Refresh the counter before trying again.');
       closeModal();renderProducts();toast(quantity?`Total quantity set to ${quantity}.`:'Item removed from the order.');
-    },'Set quantity');
+    },'Set quantity',true);
     const form=$('#modal-form'),quantityInput=$('[name=quantity]',form);
+    form.classList.add('quantity-modal-form');
+    wireQuantityKeypad(form,quantityInput);
     quantityInput.addEventListener('input',()=>{
       const quantity=Number(quantityInput.value);
       $('#quantity-set-total',form).textContent=quantityInput.value!==''&&Number.isSafeInteger(quantity)&&quantity>=0&&quantity<=max?money(quantity*product.amount_minor):'—';
@@ -440,7 +494,7 @@ async function showReceipt(sid){
   await $('.receipt-logo').decode().catch(()=>{});
   void refreshReceiptPrintStatus(sid);
 }
-function openDay(continueToCheckout=false){const today=new Intl.DateTimeFormat('en-CA',{timeZone:S.bazaar.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());formModal('Open the next business day',field('Business date','business_date','date',today,'required')+approval(),async data=>{await api('/days/open','POST',data);closeModal();await boot();toast('The business day is open.');if(continueToCheckout)openShift(true);},'Open day');}
+function openDay(continueToCheckout=false){const today=new Intl.DateTimeFormat('en-CA',{timeZone:S.bazaar?.timezone||'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());formModal('Open the next business day',field('Business date','business_date','date',today,'required')+approval(),async data=>{await api('/days/open','POST',data);closeModal();await boot();toast('The business day is open.');if(continueToCheckout)openShift(true);},'Open day');}
 async function shiftOpenErrorMessage(error){
   if(error.status!==409||!error.message.startsWith('This operation conflicts with an existing record'))return error.message;
   try{
@@ -519,7 +573,30 @@ async function productForm(pid,draftId){
     priceInput.addEventListener('input',updatePriceReason);priceInput.addEventListener('change',updatePriceReason);updatePriceReason();
   }
 }
-async function renderCatalog(){await loadCatalog();const drafts=S.productDrafts||[];$('#page').innerHTML=heading('Your products','A home for everything on your shelf.',button('New category','new-category','light','plus')+button('Add from Excel','bulk-upload-products','light','download')+button('Add product','new-product','green','plus'))+(drafts.length?`<div class="panel"><div class="panel-title"><h2>Products saved for later <span class="count-bubble">${drafts.length}</span></h2><span class="muted">Added and saved · set up anytime</span></div>${table(['Image','SKU','Description','Category','Unit price','Selling price','Qty','Status',''],drafts.map(d=>`<tr><td class="muted">—</td><td><strong>${e(d.sku)}</strong></td><td>${e(d.description)}${d.short_description?`<br><small>${e(d.short_description)}</small>`:''}</td><td>${e(d.category_name||'—')}</td><td>${d.unit_price_minor?money(d.unit_price_minor):'—'}</td><td class="muted">Set during setup</td><td class="muted">—</td><td>${pill(d.import_issue||'Set up later','warn')}</td><td>${button('Set up','complete-product','green','edit',`data-id="${d.product_import_draft_id}"`)}</td></tr>`))}</div>`:'')+`<div class="panel"><div class="panel-title"><h2>Product catalog <span class="count-bubble">${S.products.length}</span></h2><span class="muted">Unit price is locked; selling price can change</span></div>${S.products.length?table(['Product','Category','Unit price','Selling price','On hand','Status',''],S.products.map(p=>`<tr><td><div class="table-product"><div class="cart-thumb">${productVisual(p)}</div><div><strong>${e(p.description)}</strong>${p.short_description?`<small>${e(p.short_description)}</small>`:''}<small>${e(p.sku)}${p.barcode?' · '+e(p.barcode):''}</small></div></div></td><td>${e(p.category_name)}</td><td>${money(p.unit_price_minor)}</td><td>${money(p.selling_price_minor??p.amount_minor)}</td><td>${p.quantity_on_hand} ${e(p.unit)}</td><td>${pill(p.active?'Active':'Inactive',p.active?'success':'warn')}</td><td>${button('Edit','edit-product','light','edit',`data-id="${p.product_id}"`)}</td></tr>`)):empty('Start with your first product','Add one product or upload an Excel product list.','new-product','Add product')}</div>`;}
+function catalogPager(kind,page,total,pageSize){
+  if(!total)return '';
+  const pages=Math.max(1,Math.ceil(total/pageSize));
+  const first=(page-1)*pageSize+1,last=Math.min(page*pageSize,total);
+  const label=kind==='drafts'?'Saved product pages':'Catalog pages';
+  return `<nav class="catalog-pager" aria-label="${label}"><button type="button" class="btn light small" data-action="catalog-page" data-kind="${kind}" data-step="-1" ${page<=1?'disabled':''}>Previous</button><span>${num(first)}–${num(last)} of ${num(total)} · Page ${page} of ${pages}</span><button type="button" class="btn light small" data-action="catalog-page" data-kind="${kind}" data-step="1" ${page>=pages?'disabled':''}>Next</button></nav>`;
+}
+async function renderCatalog(reload=true){
+  if(reload)await loadCatalog();
+  const drafts=S.productDrafts||[],pageSize=10,needle=catalogSearch.trim().toLocaleLowerCase();
+  const matches=item=>!needle||[item.sku,item.barcode,item.description,item.short_description,item.category_name].some(value=>String(value||'').toLocaleLowerCase().includes(needle));
+  const matchingDrafts=drafts.filter(matches),matchingProducts=S.products.filter(matches);
+  catalogDraftPage=Math.min(catalogDraftPage,Math.max(1,Math.ceil(matchingDrafts.length/pageSize)));
+  catalogProductPage=Math.min(catalogProductPage,Math.max(1,Math.ceil(matchingProducts.length/pageSize)));
+  const visibleDrafts=matchingDrafts.slice((catalogDraftPage-1)*pageSize,catalogDraftPage*pageSize);
+  const visibleProducts=matchingProducts.slice((catalogProductPage-1)*pageSize,catalogProductPage*pageSize);
+  const draftRows=visibleDrafts.map(d=>`<tr><td><strong>${e(d.sku)}</strong></td><td class="catalog-description" title="${e(d.description)}"><strong>${e(d.description)}</strong>${d.short_description&&d.short_description.trim().toLocaleLowerCase()!==d.description.trim().toLocaleLowerCase()?`<small>${e(d.short_description)}</small>`:''}</td><td>${e(d.category_name||'—')}</td><td>${d.unit_price_minor?money(d.unit_price_minor):'—'}</td><td>${pill(d.import_issue||'Set up later','warn')}</td><td>${button('Set up','complete-product','green small','edit',`data-id="${d.product_import_draft_id}"`)}</td></tr>`);
+  const productRows=visibleProducts.map(p=>`<tr><td><div class="table-product"><div class="cart-thumb">${productVisual(p)}</div><div class="catalog-product-text" title="${e(p.description)}"><strong>${e(p.description)}</strong><small>${e(p.sku)}${p.barcode?' · '+e(p.barcode):''}${p.short_description&&p.short_description.trim().toLocaleLowerCase()!==p.description.trim().toLocaleLowerCase()?' · '+e(p.short_description):''}</small></div></div></td><td>${e(p.category_name)}</td><td>${money(p.unit_price_minor)}</td><td>${money(p.selling_price_minor??p.amount_minor)}</td><td>${p.quantity_on_hand} ${e(p.unit)}</td><td>${pill(p.active?'Active':'Inactive',p.active?'success':'warn')}</td><td>${button('Edit','edit-product','light small','edit',`data-id="${p.product_id}"`)}</td></tr>`);
+  const searchForm=`<form id="catalog-search" class="catalog-search" role="search"><label for="catalog-query">Search all products</label><div class="catalog-search-controls"><input id="catalog-query" type="search" value="${e(catalogSearch)}" placeholder="SKU, barcode, description or category" maxlength="120" autocomplete="off"><button class="btn green" type="submit">${icon('search')}Search</button>${catalogSearch?button('Clear','catalog-clear-search','light small','close'):''}</div></form>`;
+  const draftPanel=drafts.length?`<section class="panel catalog-panel catalog-drafts"><div class="panel-title"><h2>Products saved for later <span class="count-bubble">${num(drafts.length)}</span></h2><span class="muted">${catalogSearch?`${num(matchingDrafts.length)} matching`:'Added and saved · set up anytime'}</span></div>${draftRows.length?table(['SKU','Description','Category','Unit price','Status',''],draftRows):empty('No saved products match','Try another search.')}${catalogPager('drafts',catalogDraftPage,matchingDrafts.length,pageSize)}</section>`:'';
+  const productPanel=`<section class="panel catalog-panel catalog-products"><div class="panel-title"><h2>Product catalog <span class="count-bubble">${num(S.products.length)}</span></h2><span class="muted">${catalogSearch?`${num(matchingProducts.length)} matching`:'Unit price is locked; selling price can change'}</span></div>${productRows.length?table(['Product','Category','Unit price','Selling price','On hand','Status',''],productRows):S.products.length?empty('No products match','Try another search.'):empty('Start with your first product','Add one product or upload an Excel product list.','new-product','Add product')}${catalogPager('products',catalogProductPage,matchingProducts.length,pageSize)}</section>`;
+  $('#page').innerHTML=heading('Your products','A home for everything on your shelf.',button('New category','new-category','light','plus')+button('Add from Excel','bulk-upload-products','light','download')+button('Add product','new-product','green','plus'))+searchForm+draftPanel+productPanel;
+  $('#catalog-search').addEventListener('submit',async ev=>{ev.preventDefault();catalogSearch=$('#catalog-query').value.trim();catalogDraftPage=1;catalogProductPage=1;try{await renderCatalog(false);}catch(error){toast(error.message,true);}});
+}
 function stockForm(){
   const products=S.products;
   if(!products.length)return productForm();
@@ -582,13 +659,15 @@ function inventoryPager(kind,page,total,size){
 async function renderInventory(){
   const renderId=++inventoryRenderId;
   const query=new URLSearchParams({q:inventoryFilters.q,category_id:inventoryFilters.category_id,from:inventoryFilters.from,to:inventoryFilters.to,product_page:String(inventoryFilters.product_page),movement_page:String(inventoryFilters.movement_page)});
+  if(inventoryEventId)query.set('event_id',String(inventoryEventId));
   const data=await api('/inventory?'+query);
   if(renderId!==inventoryRenderId||S.page!=='inventory')return;
   inventoryFilters.product_page=data.product_page;inventoryFilters.movement_page=data.movement_page;
   const s=data.summary,view=inventoryFilters.view;
+  const stockMoney=n=>new Intl.NumberFormat('en',{style:'currency',currency:data.currency_code||'PHP'}).format((n||0)/100);
   const categories=S.categories.map(c=>`<option value="${c.category_id}" ${String(c.category_id)===inventoryFilters.category_id?'selected':''}>${e(c.name)}</option>`).join('');
   const filterForm=`<form class="inventory-filters" id="inventory-filters"><label>Product or SKU<input name="q" type="search" value="${e(inventoryFilters.q)}" placeholder="Search name, SKU, barcode" maxlength="120"></label><label>Category<select name="category_id"><option value="">All categories</option>${categories}</select></label><label>Posted from<input name="from" type="date" value="${e(inventoryFilters.from)}"></label><label>Posted to<input name="to" type="date" value="${e(inventoryFilters.to)}"></label><div class="inventory-filter-actions"><button class="btn green" type="submit">Apply</button>${button('Clear','inventory-clear','light')}</div></form>`;
-  const metrics=`<div class="inventory-metrics"><div><span>Closing units</span><strong>${num(s.closing)}</strong><small>${inventoryFilters.to?'As of end date':'On hand now'}</small></div><div><span>Stock added</span><strong>+${num(s.added)}</strong><small>Opening stock and receipts</small></div><div><span>Units sold</span><strong>−${num(s.sold)}</strong><small>Completed sales</small></div><div><span>Restocked</span><strong>+${num(s.restocked)}</strong><small>Sellable returns</small></div></div><div class="inventory-summary-strip"><span><strong>${num(s.products)}</strong> products</span><span><strong>${num(s.zero_products)}</strong> at zero stock</span><span><strong>${num(s.low_products)}</strong> low stock</span><span><strong>${money(s.retail_value_minor)}</strong> at current selling prices</span></div>`;
+  const metrics=`<div class="inventory-metrics"><div><span>Closing units</span><strong>${num(s.closing)}</strong><small>${inventoryFilters.to?'As of end date':'On hand now'}</small></div><div><span>Stock added</span><strong>+${num(s.added)}</strong><small>Opening stock and receipts</small></div><div><span>Units sold</span><strong>−${num(s.sold)}</strong><small>Completed sales</small></div><div><span>Restocked</span><strong>+${num(s.restocked)}</strong><small>Sellable returns</small></div></div><div class="inventory-summary-strip"><span><strong>${num(s.products)}</strong> products</span><span><strong>${num(s.zero_products)}</strong> at zero stock</span><span><strong>${num(s.low_products)}</strong> low stock</span><span><strong>${stockMoney(s.retail_value_minor)}</strong> at current selling prices</span></div>`;
   const tabs=`<div class="inventory-tabs" role="tablist" aria-label="Inventory views">${[['products','By product',data.product_total],['categories','By category',data.categories.length],['movements','Movements',data.movement_total]].map(([id,label,count])=>`<button type="button" role="tab" aria-selected="${view===id}" class="${view===id?'active':''}" data-action="inventory-view" data-view="${id}">${label}<span>${num(count)}</span></button>`).join('')}</div>`;
   const numberHeader=label=>`<span class="inventory-number-head">${label}</span>`;
   let detail='';
@@ -604,19 +683,31 @@ async function renderInventory(){
     detail=`<section class="panel inventory-detail"><div class="panel-title"><h2>Stock movements</h2><span class="muted">All matching records · newest first</span></div>${rows.length?table(['Posted','Product','Type',numberHeader('Units'),'Reference','Recorded by','Reason'],rows):`<div class="inventory-empty">No movements match these filters.</div>`}${inventoryPager('movement',data.movement_page,data.movement_total,data.movement_page_size)}</section>`;
   }
   const period=inventoryFilters.from||inventoryFilters.to?`${inventoryFilters.from||'First record'} to ${inventoryFilters.to||'now'}`:'All posting dates';
-  $('#page').innerHTML=`<div class="inventory-page">${heading('Inventory','Balances and every stock movement, in one place.',button('Record movement','new-stock','green','plus'))}${filterForm}<div class="inventory-period">${e(period)} · ${e(data.timezone)} local posting time</div>${metrics}${tabs}${detail}<p class="inventory-help">Closing = Opening + Added + Restocked − Sold. A return changes stock only when sellable units are restocked. Date filters use posting time; the business day appears beside each movement. Retail value uses current selling prices.</p></div>`;
+  $('#page').innerHTML=`<div class="inventory-page">${heading(inventoryEventId?'Archived inventory: '+archiveEventName:'Inventory','Balances and every stock movement, in one place.',inventoryEventId?button('Current event','current-inventory','light','refresh'):button('Record movement','new-stock','green','plus'))}${filterForm}<div class="inventory-period">${e(period)} · ${e(data.timezone)} local posting time</div>${metrics}${tabs}${detail}<p class="inventory-help">Closing = Opening + Added + Restocked − Sold. A return changes stock only when sellable units are restocked. Date filters use posting time; the business day appears beside each movement. Retail value uses current selling prices.</p></div>`;
   const form=$('#inventory-filters');
   form.addEventListener('submit',async ev=>{ev.preventDefault();const values=Object.fromEntries(new FormData(form));Object.assign(inventoryFilters,values,{product_page:1,movement_page:1});try{await renderInventory();}catch(error){toast(error.message,true);}});
   $$('select,input[type=date]',form).forEach(control=>control.addEventListener('change',()=>form.requestSubmit()));
 }
 
-function queryString(){return new URLSearchParams(Object.entries(S.filters).filter(([,v])=>v)).toString();}
-async function filterBar(){const f=await api('/filters');return `<div class="filters"><label>Business day<select data-filter="day_id"><option value="">All days</option>${f.days.map(d=>`<option value="${d.bazaar_day_id}" ${S.filters.day_id==d.bazaar_day_id?'selected':''}>Day ${d.day_number} · ${e(d.business_date)}</option>`).join('')}</select></label><label>From<input type="date" data-filter="from" value="${e(S.filters.from||'')}"></label><label>To<input type="date" data-filter="to" value="${e(S.filters.to||'')}"></label>${managerAccess()?`<label>Cashier<select data-filter="user_id"><option value="">All cashiers</option>${f.users.map(u=>`<option value="${u.user_id}" ${S.filters.user_id==u.user_id?'selected':''}>${e(u.display_name)}</option>`).join('')}</select></label>`:''}<label>Category<select data-filter="category_id"><option value="">All categories</option>${S.categories.map(c=>`<option value="${c.category_id}" ${S.filters.category_id==c.category_id?'selected':''}>${e(c.name)}</option>`).join('')}</select></label><label>Product<select data-filter="product_id"><option value="">All products</option>${S.products.map(p=>`<option value="${p.product_id}" ${S.filters.product_id==p.product_id?'selected':''}>${e(p.sku+' · '+p.description)}</option>`).join('')}</select></label></div>`;}
-async function renderTransactions(){const filters=await filterBar();const {sales}=await api('/sales?'+queryString());$('#page').innerHTML=heading('Every sale has a story.','Open a receipt to review its items, payment, and linked corrections.',button('Clear filters','clear-filters','light','refresh'))+filters+`<div class="panel"><div class="panel-title"><h2>Transaction history</h2><span class="muted">Latest 500 matching sales</span></div>${sales.length?table(['Receipt','Day / time','Cashier','Total','Refunded',''],sales.map(s=>`<tr><td class="mono">${e(receiptNumber(s.receipt_number))}</td><td>Day ${s.day_number} · ${e(timestamp(s.completed_at))}</td><td>${e(s.display_name)}</td><td><strong>${money(s.total_minor)}</strong></td><td>${s.refunded_minor?money(s.refunded_minor):'—'}</td><td>${button('View receipt','view-receipt','light','receipt',`data-id="${s.sale_id}"`)}</td></tr>`)):empty('No sales in this view','Completed sales appear here. Try a different date or clear the filters.')}</div>`;}
-async function renderReports(){const filters=await filterBar();const r=await api('/reports?'+queryString());const t=r.summary;
+function queryString(){const params=new URLSearchParams(Object.entries(S.filters).filter(([,v])=>v));if(S.page==='reports'&&reportEventId)params.set('event_id',String(reportEventId));return params.toString();}
+async function filterBar(){const f=await api('/filters'+(S.page==='reports'&&reportEventId?'?event_id='+reportEventId:''));return `<div class="filters"><label>Business day<select data-filter="day_id"><option value="">All days</option>${f.days.map(d=>`<option value="${d.bazaar_day_id}" ${S.filters.day_id==d.bazaar_day_id?'selected':''}>Day ${d.day_number} · ${e(d.business_date)}</option>`).join('')}</select></label><label>From<input type="date" data-filter="from" value="${e(S.filters.from||'')}"></label><label>To<input type="date" data-filter="to" value="${e(S.filters.to||'')}"></label>${managerAccess()?`<label>Cashier<select data-filter="user_id"><option value="">All cashiers</option>${f.users.map(u=>`<option value="${u.user_id}" ${S.filters.user_id==u.user_id?'selected':''}>${e(u.display_name)}</option>`).join('')}</select></label>`:''}<label>Category<select data-filter="category_id"><option value="">All categories</option>${S.categories.map(c=>`<option value="${c.category_id}" ${S.filters.category_id==c.category_id?'selected':''}>${e(c.name)}</option>`).join('')}</select></label><label>Product<select data-filter="product_id"><option value="">All products</option>${S.products.map(p=>`<option value="${p.product_id}" ${S.filters.product_id==p.product_id?'selected':''}>${e(p.sku+' · '+p.description)}</option>`).join('')}</select></label></div>`;}
+async function renderTransactions(){
+  const params=new URLSearchParams(queryString());
+  params.set('q',transactionSearch);
+  params.set('page',String(transactionPage));
+  const [filters,{sales,total,page,page_size}]=await Promise.all([filterBar(),api('/sales?'+params)]);
+  transactionPage=page;
+  const pages=Math.max(1,Math.ceil(total/page_size));
+  const start=total?(page-1)*page_size+1:0;
+  const end=total?Math.min(page*page_size,total):0;
+  const rows=sales.map(s=>`<tr><td class="mono">${e(receiptNumber(s.receipt_number))}</td><td>Day ${s.day_number} · ${e(timestamp(s.completed_at))}</td><td>${e(s.display_name)}</td><td><strong>${money(s.total_minor)}</strong></td><td>${s.refunded_minor?money(s.refunded_minor):'—'}</td><td>${button('View receipt','view-receipt','light small','receipt',`data-id="${s.sale_id}"`)}</td></tr>`);
+  $('#page').innerHTML=heading('Every sale has a story.','Open a receipt to review its items, payment, and linked corrections.',button('Clear filters','clear-filters','light','refresh'))+filters+`<div class="panel transaction-panel"><div class="panel-title"><h2>Transaction history</h2><span class="muted">${num(total)} matching ${total===1?'sale':'sales'}</span></div><form id="transaction-search" class="transaction-search" role="search"><label for="transaction-query">Search sales</label><div class="transaction-search-controls"><input id="transaction-query" type="search" value="${e(transactionSearch)}" placeholder="Receipt, cashier, product or SKU" maxlength="120" autocomplete="off"><button class="btn green" type="submit">${icon('search')}Search</button></div></form>${rows.length?table(['Receipt','Day / time','Cashier','Total','Refunded',''],rows):empty('No sales in this view','Try another search or change the filters.')}<nav class="transaction-pager" aria-label="Transaction pages"><button type="button" class="btn light small" data-action="transaction-page" data-step="-1" ${page<=1?'disabled':''}>Previous</button><span>${num(start)}–${num(end)} of ${num(total)} · Page ${page} of ${pages}</span><button type="button" class="btn light small" data-action="transaction-page" data-step="1" ${page>=pages?'disabled':''}>Next</button></nav></div>`;
+  $('#transaction-search').addEventListener('submit',async ev=>{ev.preventDefault();transactionSearch=$('#transaction-query').value.trim();transactionPage=1;try{await renderTransactions();}catch(error){toast(error.message,true);}});
+}
+async function renderReports(){const filters=await filterBar();const r=await api('/reports?'+queryString());const t=r.summary;const reportMoney=n=>new Intl.NumberFormat('en',{style:'currency',currency:r.currency_code||'PHP'}).format((n||0)/100);
   const unitLabel=(count,action)=>`${num(count)} ${count===1?'unit':'units'} ${action}`;
-  const reportTable=(title,rows)=>`<div class="panel"><div class="panel-title"><h2>${title}</h2></div>${rows.length?table(['Description','Unit counts','Sales','Refunds','Net'],rows.map(r=>`<tr><td><strong>${e(r.label)}</strong></td><td><div class="report-unit-count"><strong>${unitLabel(r.units,'sold')}</strong>${r.returned_units?`<span>${unitLabel(r.returned_units,'returned or voided')}</span>`:''}</div></td><td>${money(r.sales_minor)}</td><td>${money(r.refunds_minor)}</td><td><strong>${money(r.sales_minor-r.refunds_minor)}</strong></td></tr>`)):empty('No activity in this view','Sales and returns will appear here.')}</div>`;
-  $('#page').innerHTML=heading('A good look at your day.','Follow the numbers from each business day to every item.',button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${queryString()}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${money(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Gross sales</label><div class="value">${money(t.gross_minor)}</div><small>${unitLabel(t.units,'sold')} · ${t.transactions} transactions</small></div><div class="stat"><label>Refunds</label><div class="value">${money(t.refunds_minor)}</div><small>${unitLabel(t.returned_units,'returned or voided')}</small></div><div class="stat"><label>Average sale</label><div class="value">${money(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportTable('By business day',r.days)+`<div class="two-col">${reportTable('By category',r.categories)}${reportTable('By cashier',r.cashiers)}</div>`+reportTable('By product',r.items)+`<p class="muted"><small>Refunds belong to the day and cashier that processed them. Categories use the label recorded when sold. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
+  const reportTable=(title,rows)=>`<div class="panel"><div class="panel-title"><h2>${title}</h2></div>${rows.length?table(['Description','Unit counts','Sales','Refunds','Net'],rows.map(r=>`<tr><td><strong>${e(r.label)}</strong></td><td><div class="report-unit-count"><strong>${unitLabel(r.units,'sold')}</strong>${r.returned_units?`<span>${unitLabel(r.returned_units,'returned or voided')}</span>`:''}</div></td><td>${reportMoney(r.sales_minor)}</td><td>${reportMoney(r.refunds_minor)}</td><td><strong>${reportMoney(r.sales_minor-r.refunds_minor)}</strong></td></tr>`)):empty('No activity in this view','Sales and returns will appear here.')}</div>`;
+  $('#page').innerHTML=heading(reportEventId?'Archived report: '+archiveEventName:'A good look at your day.','Follow the numbers from each business day to every item.',(reportEventId?button('Current event','current-report','light','refresh'):'')+button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${queryString()}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${reportMoney(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Gross sales</label><div class="value">${reportMoney(t.gross_minor)}</div><small>${unitLabel(t.units,'sold')} · ${t.transactions} transactions</small></div><div class="stat"><label>Refunds</label><div class="value">${reportMoney(t.refunds_minor)}</div><small>${unitLabel(t.returned_units,'returned or voided')}</small></div><div class="stat"><label>Average sale</label><div class="value">${reportMoney(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportTable('By business day',r.days)+`<div class="two-col">${reportTable('By category',r.categories)}${reportTable('By cashier',r.cashiers)}</div>`+reportTable('By product',r.items)+`<p class="muted"><small>Refunds belong to the day and cashier that processed them. Categories use the label recorded when sold. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
 }
 async function renderShifts(){
   const pageSize=10;
@@ -628,7 +719,7 @@ async function renderShifts(){
   const shiftTable=rows=>table(['Cashier','Shift','Day','Opening cash','Expected','Counted','Variance','Status',''],rows.map(s=>`<tr><td><strong>${e(s.display_name)}</strong></td><td>#${s.shift_id}</td><td>Day ${s.day_number}</td><td>${money(s.opening_cash_minor)}</td><td>${money(s.live_expected_minor)}</td><td>${s.counted_cash_minor===null?'—':money(s.counted_cash_minor)}</td><td>${s.variance_minor===null?'—':money(s.variance_minor)}</td><td>${pill(s.status,s.status==='open'?'success':s.variance_minor?'warn':'')}</td><td>${s.status==='open'&&managerAccess()?button('Manager close','manager-close-shift','light','shield',`data-id="${s.shift_id}"`):''}</td></tr>`));
   const first=(shiftHistoryPage-1)*pageSize;
   const pager=total?`<nav class="shift-pager" aria-label="Shift history pages">${button('Previous','shift-page','light','','data-step="-1" '+(shiftHistoryPage===1?'disabled':''))}<span>Page ${shiftHistoryPage} of ${pageCount} · ${first+1}–${first+closedShifts.length} of ${total}</span>${button('Next','shift-page','light','','data-step="1" '+(shiftHistoryPage===pageCount?'disabled':''))}</nav>`:'';
-  $('#page').innerHTML=heading('A balanced counter.','Open shifts and a paged history of closed shifts.',S.shift?button('Cash in / out','cash-movement','light','plus',!managerAccess()?'hidden':'')+button('Close my shift','close-shift','green','clock'):button('Open my shift','open-shift','green','plus',!S.day?'disabled':''))+`<div class="panel"><div class="panel-title"><h2>Open cashier shifts</h2><span class="muted">${openShifts.length} open${managerAccess()?' · managers can close each shift':''}</span></div>${openShifts.length?shiftTable(openShifts):'<p class="shift-no-open">No open shifts right now.</p>'}</div><div class="panel"><div class="panel-title"><h2>Shift history</h2><span class="muted">${total} closed shifts</span></div>${closedShifts.length?shiftTable(closedShifts)+pager:empty('No closed shifts yet','Completed shifts appear here.')}</div>`;
+  $('#page').innerHTML=heading('A balanced counter.','Open shifts and a paged history of closed shifts.',S.shift?button('Close my shift','close-shift','green','clock'):button('Open my shift','open-shift','green','plus',!S.day?'disabled':''))+`<div class="panel"><div class="panel-title"><h2>Open cashier shifts</h2><span class="muted">${openShifts.length} open${managerAccess()?' · managers can close each shift':''}</span></div>${openShifts.length?shiftTable(openShifts):'<p class="shift-no-open">No open shifts right now.</p>'}</div><div class="panel"><div class="panel-title"><h2>Shift history</h2><span class="muted">${total} closed shifts</span></div>${closedShifts.length?shiftTable(closedShifts)+pager:empty('No closed shifts yet','Completed shifts appear here.')}</div>`;
 }
 function askShiftCloseConfirmation(shift,counted,reason='',order=null){
   return new Promise(resolve=>{
@@ -671,7 +762,6 @@ async function closeShift(){
     closeModal();shiftHistoryPage=1;S.page=S.page==='management'?'management':'shifts';await boot();toast('Shift closed. Cash variance: '+money(result.variance_minor));
   },'Review closure');
 }
-function cashMovement(){formModal('Record cash in / out',selectField('Direction','direction',[['in','Cash in'],['out','Cash out']])+field('Amount','amount','text','','required inputmode="decimal"')+field('Reason','reason','text','','required')+approval(),async data=>{const form=$('#modal-form');form.dataset.requestKey ||= key();await api('/cash-movements','POST',{...data,request_key:form.dataset.requestKey,amount_minor:minor(data.amount)});closeModal();await renderShifts();toast('Cash movement recorded.');},'Record cash');}
 function refundAmount(line,quantity){
   const previous=line.returned_quantity||0;
   return Math.floor((previous+quantity)*line.line_total_minor/line.quantity)-Math.floor(previous*line.line_total_minor/line.quantity);
@@ -707,7 +797,7 @@ function userForm(uid){
   formModal(u?'Manage account':'Create an account',field('Display name','display_name','text',u?.display_name||'','required')+(u?`<div class="field"><label>Username</label><input value="${e(u.username)}" disabled></div>`:field('Username','username','text','','required minlength="3" maxlength="50"'))+roleField+statusField+`<div class="field full"><label for="f-password">${u?'New password (leave blank to keep current)':'Password'}</label><input type="password" name="password" id="f-password" autocomplete="new-password" minlength="12" ${u?'':'required'}></div>${locked?'<div class="field full"><small>Only ginflorita can update this account. Its role and active status are locked.</small></div>':''}`+approval(),async data=>{await api(u?'/users/'+uid:'/users',u?'PUT':'POST',{...data,active:data.active==='true'});closeModal();await renderTeam();toast('Account saved.');},'Save account');
 }
 function auditActionLabel(action){return ({'shift.closed_by_manager':'Manager closed shift','shift.closed':'Cashier closed shift'})[action]||action.replace(/[._]/g,' ').replace(/^./,c=>c.toUpperCase());}
-function auditRecordLabel(a){return a.entity_type==='shifts'?`Shift #${a.entity_key}`:`${a.entity_type.replaceAll('_',' ')} ${a.entity_key||''}`.trim();}
+function auditRecordLabel(a){if(a.entity_type==='shifts')return `Shift #${a.entity_key}`;if(a.entity_type==='bazaars')return `Event #${a.entity_key}`;if(a.entity_type==='bazaar_days')return `Business day #${a.entity_key}`;return `${a.entity_type.replaceAll('_',' ')} ${a.entity_key||''}`.trim();}
 function auditSnapshot(raw){try{return raw?JSON.parse(raw):null;}catch{return raw;}}
 function auditTechnicalDetails(a){
   const before=auditSnapshot(a.before_json),after=auditSnapshot(a.after_json);
@@ -729,7 +819,7 @@ function auditDetails(a){
   const facts=fact('Action',auditActionLabel(a.action))+fact('Record',auditRecordLabel(a))+fact('Person',a.display_name||a.attempted_username||'System')+fact('Time',timestamp(a.created_at))+(a.reason?fact('Reason',a.reason):'');
   modal('Audit event #'+a.audit_event_id,`<div class="stack"><dl class="audit-facts">${facts}</dl>${auditTechnicalDetails(a)}</div>`);
 }
-async function renderAudit(){const {events}=await api('/audit');$('#page').innerHTML=heading('The details stay with you.','An append-only record of who did what, and when.',button('Refresh','refresh-page','light','refresh'))+`<div class="panel"><div class="panel-title"><h2>Audit trail</h2><span class="muted">Latest 500 events</span></div>${events.length?table(['Time','Person','Action','Record','Reason / details'],events.map(a=>`<tr><td>${e(timestamp(a.created_at))}</td><td>${e(a.display_name||a.attempted_username||'System')}</td><td>${e(auditActionLabel(a.action))}</td><td>${e(auditRecordLabel(a))}</td><td class="audit-reason">${e(a.reason||'—')}${a.after_json?`<br>${button('Details','audit-details','light small','',`data-id="${a.audit_event_id}"`)}`:''}</td></tr>`)):empty('A record from the start','Activity will appear here as your team uses the counter.')}</div>`;S.auditEvents=events;}
+async function renderAudit(){const {events}=await api('/audit'+(auditEventId?'?event_id='+auditEventId:''));$('#page').innerHTML=heading(auditEventId?'Archived audit: '+archiveEventName:'The details stay with you.','An append-only record of who did what, and when.',(auditEventId?button('Current event','current-audit','light','refresh'):'')+button('Refresh','refresh-page','light','refresh'))+`<div class="panel"><div class="panel-title"><h2>Audit trail</h2><span class="muted">Latest 500 events</span></div>${events.length?table(['Time','Person','Action','Record','Reason / details'],events.map(a=>`<tr><td>${e(timestamp(a.created_at))}</td><td>${e(a.display_name||a.attempted_username||'System')}</td><td>${e(auditActionLabel(a.action))}</td><td>${e(auditRecordLabel(a))}</td><td class="audit-reason">${e(a.reason||'—')}${a.after_json?`<br>${button('Details','audit-details','light small','',`data-id="${a.audit_event_id}"`)}`:''}</td></tr>`)):empty('A record from the start','Activity will appear here as your team uses the counter.')}</div>`;S.auditEvents=events;}
 async function renderManagement(){
   let card;
   if(S.day){
@@ -743,10 +833,39 @@ async function renderManagement(){
     }else{
       card=`<div class="eyebrow">Day ${dayNumber} · ${e(S.day.business_date)}</div><h2>Ready to close Day ${dayNumber}</h2><p>All cashier shifts are closed. Close the day to save its final totals and create a backup.</p>${button(`Close Day ${dayNumber}`,'close-day','green','sun')}`;
     }
+  }else if(!S.bazaar){
+    card=`<h2>Waiting for the next event</h2><p>The IT System Administrator starts the event. After that, a manager can open Day 1 here.</p>${S.user.role==='it_admin'?button('Open Events','go-to-events','green','sun'):''}`;
   }else{
     card=`<h2>Start the next business day</h2><p>Choose the business date and enter your manager password. Cashiers can then open their shifts in Checkout.</p>${button('Open day','open-day','green','sun')}`;
   }
   $('#page').innerHTML=heading('Business day','Open and close each business day here.')+`<section class="panel business-day-card" aria-label="Next business day action"><div class="panel-body">${card}</div></section>`;
+}
+async function renderEvents(){
+  const {events}=await api('/events');
+  const current=events.find(item=>item.status==='active'),last=events[0];
+  let action;
+  if(current){
+    action=`<h2>${e(current.event_name)}</h2><p>Started ${e(current.starts_on)}. Managers open and close business days; cashiers open and close their own shifts.</p>${button('Rename event','rename-event','light small','edit',`data-name="${e(current.event_name)}"`)}${S.day?`<p>Day ${S.day.day_number} is still open. Ask the manager to close it before ending this event.</p>`:button('End event','end-event','green','sun')}`;
+  }else if(last&&!last.archive_backup){
+    action=`<h2>Finish the archive</h2><p>The last event is closed, but its verified backup did not finish. Retry the archive before starting another event.</p>${button('Retry archive','retry-event-archive','green','download')}`;
+  }else{
+    action=`<h2>Ready for a new event</h2><p>Starting an event keeps products, accounts, and settings. Stock starts at zero; a manager can then open Day 1.</p>${button('Start event','start-event','green','plus')}`;
+  }
+  const archived=events.filter(item=>item.status==='closed');
+  const rows=archived.map(item=>`<tr><td><strong>${e(item.event_name)}</strong></td><td>${e(item.starts_on)}${item.ends_on?' – '+e(item.ends_on):''}</td><td>${pill(item.archive_backup?'Archived':'Backup needed',item.archive_backup?'success':'warn')}</td><td class="event-actions">${button('View report','event-report','light small','chart',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}${button('Inventory','event-inventory','light small','box',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}${button('View audit','event-audit','light small','shield',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}<a class="btn light small" href="/api/reports?event_id=${item.bazaar_id}&format=xlsx">${icon('download')}Excel</a></td></tr>`);
+  $('#page').innerHTML=heading('Events','The IT System Administrator starts and ends events. Each event keeps its own days, stock movements, sales, reports, and audit trail.')+`<section class="panel event-card"><div class="panel-body">${action}</div></section><section class="panel event-history"><div class="panel-title"><h2>Past events</h2><span class="muted">Read-only records</span></div>${rows.length?table(['Event','Dates','Archive','Reports and logs'],rows):empty('No past events yet','The finished event will appear here after it ends.')}</section>`;
+}
+function startEventModal(){
+  formModal('Start a new event',`<div class="field full"><small>Products and current prices stay. Stock starts at zero, and a manager opens Day 1 after this event starts.</small></div>`+field('Event name','event_name','text','','required maxlength="120"')+approval(),async data=>{await api('/events/start','POST',data);closeModal();reportEventId=null;auditEventId=null;S.page='events';await boot();toast('New event started. Ask a manager to open Day 1.');},'Start event');
+}
+function renameEventModal(name){
+  formModal('Name this event',field('Event name','event_name','text',name,'required maxlength="120"')+approval(),async data=>{await api('/events/rename','POST',data);closeModal();await renderEvents();toast('Event name saved.');},'Save name');
+}
+function endEventModal(){
+  formModal('End this event',`<div class="field full"><small>All days, shifts, unpaid orders, and pending receipt print jobs must be finished. A verified backup will archive this event. The next event begins with zero stock while products stay in the catalog.</small></div><div class="field full"><label class="check-field"><input type="checkbox" name="checked" required><span>I checked the final reports and cash reconciliation.</span></label></div>`+approval(),async data=>{try{await api('/events/end','POST',data);}catch(error){await boot();throw error;}closeModal();S.page='events';await boot();toast('Event ended and archived.');},'End event');
+}
+function retryEventArchiveModal(){
+  formModal('Retry event archive',`<div class="field full"><small>The completed event stays closed. A verified backup is required before starting another event.</small></div>`+approval(),async data=>{await api('/events/archive','POST',data);closeModal();S.page='events';await boot();toast('Event archive verified.');},'Retry archive');
 }
 async function renderDiscounts(){
   const config=await api('/discount');
@@ -782,7 +901,7 @@ function managerAction(title,description,path){
 document.addEventListener('click',async ev=>{
   const target=ev.target.closest('button,[data-page]');if(!target)return;
   try{
-    if(target.dataset.page){if(S.paying)return;await cartQueue;if(target.dataset.page==='checkout')return requestCheckout();return await navigate(target.dataset.page);}
+    if(target.dataset.page){if(S.paying)return;await cartQueue;if(target.dataset.page==='checkout')return requestCheckout();if(target.dataset.page==='reports')reportEventId=null;if(target.dataset.page==='audit')auditEventId=null;if(target.dataset.page==='inventory')inventoryEventId=null;return await navigate(target.dataset.page);}
     if(target.dataset.productPage){S.productPage+=target.dataset.productPage==='next'?1:-1;renderProducts();$('#product-grid').scrollTop=0;return;}
     if(target.dataset.add){await productQuantityModal(Number(target.dataset.add));return;}
     if(target.dataset.qty){try{await addProduct(Number(target.dataset.qty),Number(target.dataset.delta));}finally{$('#product-search')?.focus({preventScroll:true});}return;}
@@ -792,23 +911,46 @@ document.addEventListener('click',async ev=>{
     const actions={
       'checkout-fullscreen':openCheckoutFullscreen,'toggle-checkout-fullscreen':()=>checkoutFullscreen?leaveCheckoutFullscreen():enterCheckoutFullscreen(),'toggle-management':toggleManagement,
       'close-modal':closeModal,'boot':boot,'open-day':openDay,'open-shift':openShift,'close-shift':closeShift,'day-steps':async()=>{if(S.paying)return;await cartQueue;return navigate('management');},'pay':paymentModal,
-      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'set-cart-quantity':()=>setCartQuantityModal(id),'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'save-product-import':()=>savePendingProductImport(target),'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,'cash-movement':cashMovement,
+      'go-to-events':()=>{closeModal();return navigate('events');},
+      'start-event':startEventModal,'rename-event':()=>renameEventModal(target.dataset.name),'end-event':endEventModal,'retry-event-archive':retryEventArchiveModal,
+      'event-report':()=>{reportEventId=id;archiveEventName=target.dataset.name;S.filters={};return navigate('reports');},
+      'event-inventory':()=>{inventoryEventId=id;archiveEventName=target.dataset.name;Object.assign(inventoryFilters,{q:'',category_id:'',from:'',to:'',view:'products',product_page:1,movement_page:1});return navigate('inventory');},
+      'event-audit':()=>{auditEventId=id;archiveEventName=target.dataset.name;return navigate('audit');},
+      'current-report':()=>{reportEventId=null;S.filters={};return renderReports();},
+      'current-inventory':()=>{inventoryEventId=null;return renderInventory();},
+      'current-audit':()=>{auditEventId=null;return renderAudit();},
+      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'set-cart-quantity':()=>setCartQuantityModal(id),'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'save-product-import':()=>savePendingProductImport(target),'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,
       'new-user':()=>userForm(),'edit-user':()=>userForm(id),'manager-close-shift':()=>managerCloseShift(id),
       'view-product-image':()=>viewProductImage(id),'view-cart-description':()=>viewCartDescription(id),'view-receipt':()=>showReceipt(id),'return-sale':()=>returnSale(id),
       'refresh-page':()=>navigate(S.page),'backup-page':()=>{backupPage+=Number(target.dataset.step);return renderBackups();},
+      'catalog-page':async()=>{const kind=target.dataset.kind;if(kind==='drafts')catalogDraftPage=Math.max(1,catalogDraftPage+Number(target.dataset.step));else catalogProductPage=Math.max(1,catalogProductPage+Number(target.dataset.step));await renderCatalog(false);$(kind==='drafts'?'.catalog-drafts':'.catalog-products')?.scrollIntoView({block:'start'});},
+      'catalog-clear-search':()=>{catalogSearch='';catalogDraftPage=1;catalogProductPage=1;return renderCatalog(false);},
+      'transaction-page':async()=>{transactionPage=Math.max(1,transactionPage+Number(target.dataset.step));await renderTransactions();$('.transaction-panel')?.scrollIntoView({block:'start'});},
       'inventory-view':()=>{inventoryFilters.view=target.dataset.view;return renderInventory();},
       'inventory-page':()=>{const key=target.dataset.kind==='product'?'product_page':'movement_page';inventoryFilters[key]=Math.max(1,inventoryFilters[key]+Number(target.dataset.step));return renderInventory();},
       'inventory-clear':()=>{Object.assign(inventoryFilters,{q:'',category_id:'',from:'',to:'',product_page:1,movement_page:1});return renderInventory();},
       'inventory-category':()=>{inventoryFilters.category_id=String(id);inventoryFilters.product_page=1;inventoryFilters.movement_page=1;inventoryFilters.view='products';return renderInventory();},
       'shift-page':()=>{shiftHistoryPage=Math.max(1,shiftHistoryPage+Number(target.dataset.step));return renderShifts();},
-      'clear-filters':async()=>{S.filters={};await navigate(S.page);},
-      'logout':async()=>{await cartQueue;await api('/logout','POST',{});S.ticket=null;S.cart=[];S.page='reports';history.replaceState(null,'',`${location.pathname}${location.search}`);await boot();},
+      'clear-filters':async()=>{S.filters={};if(S.page==='transactions'){transactionSearch='';transactionPage=1;}await navigate(S.page);},
+      'logout':confirmLogout,
+      'confirm-logout':async()=>{target.disabled=true;try{await signOut();}catch(error){target.disabled=false;throw error;}},
       'new-category':()=>formModal('Add a category',field('Category name','name','text','','required'),async data=>{await api('/categories','POST',data);closeModal();await renderCatalog();toast('Category added.');},'Add category'),
       'close-day':()=>managerAction(`Close Day ${S.day?.day_number||''}`,'All cashier shifts and unpaid orders must be closed. The POS will create a backup, then you can open the next day here.','/days/close'),
       'backup':()=>managerAction('Create backup','Create and verify a snapshot of the live database, including product images.','/backups'),
       'add-discount':discountForm,'delete-discount':()=>deleteDiscount(id),
       'pair-printer':pairPrinter,'configure-printer':configurePrinter,'disconnect-printer':disconnectPrinter,'refresh-printers':renderPrinter,'start-print-helper':startPrintHelper,'resolve-print':()=>resolvePrint(id),'printer-copy':()=>queuePrinterCopy(id),
-      'print-receipt':async()=>{target.disabled=true;try{await api('/sales/'+id+'/reprint','POST',{});await showReceipt(id);window.print();}finally{target.disabled=false;}},
+      'print-receipt':async()=>{
+        target.disabled=true;
+        try{
+          await api('/sales/'+id+'/reprint','POST',{});
+          await showReceipt(id);
+          const previousTitle=document.title;
+          document.title=receiptNumber(currentReceipt.sale.receipt_number);
+          const restoreTitle=()=>{document.title=previousTitle;};
+          window.addEventListener('afterprint',restoreTitle,{once:true});
+          try{window.print();}catch(error){window.removeEventListener('afterprint',restoreTitle);restoreTitle();throw error;}
+        }finally{target.disabled=false;}
+      },
       'audit-details':()=>{const a=S.auditEvents.find(a=>a.audit_event_id===id);if(a)auditDetails(a);}
     };
     if(actions[action])await actions[action]();
@@ -834,7 +976,7 @@ document.addEventListener('change',async ev=>{
     }
     return;
   }
-  if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;await navigate(S.page);}
+  if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;if(S.page==='transactions')transactionPage=1;await navigate(S.page);}
 });
 document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void leaveCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$$('.modal').at(-1));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
 setInterval(async()=>{if(pollBusy||S.paying||document.hidden)return;pollBusy=true;try{const old=JSON.stringify([S.user?.user_id,S.day?.bazaar_day_id,S.shift?.shift_id]);const result=await refreshState();const next=JSON.stringify([result.user?.user_id,result.day?.bazaar_day_id,result.shift?.shift_id]);if(old!==next&&!$('.modal'))await boot();}catch{}finally{pollBusy=false;}},20000);
