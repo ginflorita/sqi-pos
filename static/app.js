@@ -65,7 +65,7 @@ function confirmLogout(){
 async function signOut(){
   await cartQueue;
   await api('/logout','POST',{});
-  S.ticket=null;S.cart=[];S.page='reports';
+  S.ticket=null;S.cart=[];S.filters={};S.page='reports';
   history.replaceState(null,'',`${location.pathname}${location.search}`);
   await boot();
 }
@@ -689,8 +689,16 @@ async function renderInventory(){
   $$('select,input[type=date]',form).forEach(control=>control.addEventListener('change',()=>form.requestSubmit()));
 }
 
-function queryString(){const params=new URLSearchParams(Object.entries(S.filters).filter(([,v])=>v));if(S.page==='reports'&&reportEventId)params.set('event_id',String(reportEventId));return params.toString();}
-async function filterBar(){const f=await api('/filters'+(S.page==='reports'&&reportEventId?'?event_id='+reportEventId:''));return `<div class="filters"><label>Business day<select data-filter="day_id"><option value="">All days</option>${f.days.map(d=>`<option value="${d.bazaar_day_id}" ${S.filters.day_id==d.bazaar_day_id?'selected':''}>Day ${d.day_number} · ${e(d.business_date)}</option>`).join('')}</select></label><label>From<input type="date" data-filter="from" value="${e(S.filters.from||'')}"></label><label>To<input type="date" data-filter="to" value="${e(S.filters.to||'')}"></label>${managerAccess()?`<label>Cashier<select data-filter="user_id"><option value="">All cashiers</option>${f.users.map(u=>`<option value="${u.user_id}" ${S.filters.user_id==u.user_id?'selected':''}>${e(u.display_name)}</option>`).join('')}</select></label>`:''}<label>Category<select data-filter="category_id"><option value="">All categories</option>${S.categories.map(c=>`<option value="${c.category_id}" ${S.filters.category_id==c.category_id?'selected':''}>${e(c.name)}</option>`).join('')}</select></label><label>Product<select data-filter="product_id"><option value="">All products</option>${S.products.map(p=>`<option value="${p.product_id}" ${S.filters.product_id==p.product_id?'selected':''}>${e(p.sku+' · '+p.description)}</option>`).join('')}</select></label></div>`;}
+function queryString(){
+  const allowed=managerAccess()?null:new Set(['day_id','from','to']);
+  const params=new URLSearchParams(Object.entries(S.filters).filter(([name,value])=>value&&(!allowed||allowed.has(name))));
+  if(S.page==='reports'&&reportEventId)params.set('event_id',String(reportEventId));
+  return params.toString();
+}
+async function filterBar(){
+  const f=await api('/filters'+(S.page==='reports'&&reportEventId?'?event_id='+reportEventId:''));
+  return `<div class="filters"><label>Business day<select data-filter="day_id"><option value="">All days</option>${f.days.map(d=>`<option value="${d.bazaar_day_id}" ${S.filters.day_id==d.bazaar_day_id?'selected':''}>Day ${d.day_number} · ${e(d.business_date)}</option>`).join('')}</select></label><label>From<input type="date" data-filter="from" value="${e(S.filters.from||'')}"></label><label>To<input type="date" data-filter="to" value="${e(S.filters.to||'')}"></label>${managerAccess()?`<label>Cashier<select data-filter="user_id"><option value="">All cashiers</option>${f.users.map(u=>`<option value="${u.user_id}" ${S.filters.user_id==u.user_id?'selected':''}>${e(u.display_name)}</option>`).join('')}</select></label><label>Category<select data-filter="category_id"><option value="">All categories</option>${S.categories.map(c=>`<option value="${c.category_id}" ${S.filters.category_id==c.category_id?'selected':''}>${e(c.name)}</option>`).join('')}</select></label><label>Product<select data-filter="product_id"><option value="">All products</option>${S.products.map(p=>`<option value="${p.product_id}" ${S.filters.product_id==p.product_id?'selected':''}>${e(p.sku+' · '+p.description)}</option>`).join('')}</select></label>`:''}</div>`;
+}
 async function renderTransactions(){
   const params=new URLSearchParams(queryString());
   params.set('q',transactionSearch);
@@ -979,6 +987,7 @@ document.addEventListener('change',async ev=>{
   }
   if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;if(S.page==='transactions')transactionPage=1;await navigate(S.page);}
 });
+document.addEventListener('contextmenu',ev=>ev.preventDefault());
 document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void leaveCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$$('.modal').at(-1));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
 setInterval(async()=>{if(pollBusy||S.paying||document.hidden)return;pollBusy=true;try{const old=JSON.stringify([S.user?.user_id,S.day?.bazaar_day_id,S.shift?.shift_id]);const result=await refreshState();const next=JSON.stringify([result.user?.user_id,result.day?.bazaar_day_id,result.shift?.shift_id]);if(old!==next&&!$('.modal'))await boot();}catch{}finally{pollBusy=false;}},20000);
 setInterval(refreshCheckoutStock,30000);
