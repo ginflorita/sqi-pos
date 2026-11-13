@@ -1319,7 +1319,10 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @signed_in()
     def reprint(sid):
         data = payload()
-        reason = text_field(data, 'reason', 300, optional=True) or 'Customer copy'
+        copy_type = data.get('copy_type', 'customer')
+        require(copy_type in ('customer', 'store'), 'Choose Customer Copy or Store Copy.')
+        require(copy_type != 'store' or g.user['role'] in ('manager', 'it_admin'), 'Manager access is required for Store Copy.', 403)
+        reason = text_field(data, 'reason', 300, optional=True) or copy_type.title() + ' copy'
         with transaction(db()):
             sale = sale_access(sid)
             require(not db().execute("SELECT 1 FROM receipt_print_jobs WHERE sale_id=? AND status IN ('queued','claimed')", (sid,)).fetchone(),

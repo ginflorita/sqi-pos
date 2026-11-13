@@ -33,7 +33,9 @@ def launch_print_helper(config_path):
         )
 
 
-def receipt_image(db, sale_id, paper_size):
+def receipt_image(db, sale_id, paper_size, copy_type='customer'):
+    if copy_type not in ('customer', 'store'):
+        raise ValueError('Invalid receipt copy type.')
     sale = db.execute('''SELECT s.*,u.display_name,d.business_date FROM sales s
         JOIN users u ON u.user_id=s.cashier_user_id JOIN bazaar_days d USING(bazaar_day_id)
         WHERE sale_id=?''', (sale_id,)).fetchone()
@@ -84,8 +86,12 @@ def receipt_image(db, sale_id, paper_size):
 
     inset = 14
     right_edge = width - inset
-    line_height = sum(len(wrapped(receipt_item_name(line), regular, width - inset * 2)) * (25 if is_58 else 28)
-                      + (40 if is_58 else 46) + (22 if line['discount_minor'] else 0) for line in lines)
+    description_x = inset + (36 if is_58 else 48)
+    price_right = right_edge - (85 if is_58 else 105)
+    description_width = price_right - (80 if is_58 else 100) - description_x
+    row_height = 25 if is_58 else 28
+    line_height = sum(max(1, len(wrapped(receipt_item_name(line), regular, description_width))) * row_height
+                      + 18 + (22 if line['discount_minor'] else 0) for line in lines)
     image = Image.new('RGB', (width, max(2400, 650 + line_height)), 'white')
     draw = ImageDraw.Draw(image)
 
@@ -95,6 +101,9 @@ def receipt_image(db, sale_id, paper_size):
     def right(text, y, font=regular):
         draw.text((right_edge - font.getlength(text), y), text, font=font, fill='black')
 
+    def right_at(text, x, y, font=regular):
+        draw.text((x - font.getlength(text), y), text, font=font, fill='black')
+
     def rule(y):
         dash, gap = (7, 5) if is_58 else (9, 6)
         x = inset
@@ -102,16 +111,15 @@ def receipt_image(db, sale_id, paper_size):
             draw.line((x, y, min(x + dash, right_edge), y), fill='#777', width=1)
             x += dash + gap
 
-    logo = Image.open(ROOT / 'static' / 'sqi-logo.png').convert('RGBA')
-    logo.thumbnail((150, 85) if is_58 else (190, 105))
-    image.paste(logo, ((width - logo.width) // 2, 8), logo)
-    y = 96 if is_58 else 116
-    centered("SQI Group Int'l Corp - Philippines", y, company_font)
-    y += 28
+    y = 12
+    centered("SQI Group Int'l Corp Philippines", y, company_font)
+    y += 25
+    centered('18 Pineapple St., Potrero, Malabon City', y, small)
+    y += 27
     centered('ACKNOWLEDGEMENT RECEIPT', y, heading)
-    y += 29
-    centered(sale['receipt_number'].replace('BZ-', 'SQI-', 1), y, small)
-    y += 42
+    y += 27
+    centered(copy_type.upper() + ' COPY', y, heading)
+    y += 32
     rule(y)
     y += 24
     draw.text((inset, y), 'Date: ' + sale['business_date'], font=small, fill='black')
@@ -120,35 +128,38 @@ def receipt_image(db, sale_id, paper_size):
     y += 34
     rule(y)
     y += 27
-    draw.text((inset, y), 'ITEM', font=small, fill='black')
+    draw.text((inset, y), 'QTY', font=small, fill='black')
+    draw.text((description_x, y), 'DESCRIPTION', font=small, fill='black')
+    right_at('PRICE', price_right, y, small)
     right('AMOUNT', y, small)
-    y += 40
+    y += 32
     for line in lines:
-        for description in wrapped(receipt_item_name(line), regular, width - inset * 2):
-            draw.text((inset, y), description, font=regular, fill='black')
-            y += 25 if is_58 else 28
-        detail = f"{line['quantity']} x {amount(line['unit_price_minor'])}"
-        draw.text((inset, y), detail, font=small, fill='black')
-        right(amount(line['line_total_minor']), y, small)
+        descriptions = wrapped(receipt_item_name(line), regular, description_width)
+        draw.text((inset, y), str(line['quantity']), font=small, fill='black')
+        right_at(amount(line['unit_price_minor']), price_right, y, small)
+        right(amount(line['quantity'] * line['unit_price_minor']), y, small)
+        for description in descriptions:
+            draw.text((description_x, y), description, font=regular, fill='black')
+            y += row_height
         if line['discount_minor']:
-            y += 22
             draw.text((inset, y), 'Discount', font=small, fill='black')
             right('-' + amount(line['discount_minor']), y, small)
-        y += 40 if is_58 else 46
+            y += 22
+        y += 18
     rule(y)
     y += 22
+    draw.text((inset, y), 'Total amount', font=regular, fill='black')
+    right(amount(sale['subtotal_minor']), y)
+    y += 32
     if sale['discount_minor']:
-        draw.text((inset, y), 'Subtotal', font=regular, fill='black')
-        right(amount(sale['subtotal_minor']), y)
-        y += 32
         rate = f"{sale['discount_percent_bp'] / 100:g}%"
         draw.text((inset, y), f'Discount ({rate})', font=regular, fill='black')
         right('-' + amount(sale['discount_minor']), y)
         y += 38
-    draw.text((inset, y + 4), 'TOTAL', font=regular, fill='black')
+    draw.text((inset, y + 4), 'TOTAL TO PAY', font=regular, fill='black')
     right(amount(sale['total_minor']), y, total_font)
     y += 54
-    draw.text((inset, y), 'Cash paid', font=regular, fill='black')
+    draw.text((inset, y), 'Amount tendered', font=regular, fill='black')
     right(amount(payment['tendered_minor']), y)
     y += 34
     draw.text((inset, y), 'Change', font=regular, fill='black')
@@ -156,20 +167,28 @@ def receipt_image(db, sale_id, paper_size):
     y += 42
     rule(y)
     y += 24
-    centered('Thank you for your purchase.', y, small)
-    y += 35
-    address = 'Head office: 18 Pineapple Rd, Malabon, 1475 Metro Manila, Philippines'
-    for address_line in wrapped(address, small, width - inset * 2):
-        draw.text((inset, y), address_line, font=small, fill='black')
-        y += 21
-    y += 8
-    footer_gap = width // 2
+    draw.text((inset, y), f"Number of items: {sum(line['quantity'] for line in lines)}", font=small, fill='black')
+    y += 26
+    draw.text((inset, y), 'Transaction No.: ' + sale['receipt_number'].replace('BZ-', 'SQI-', 1), font=small, fill='black')
+    y += 27
+    rule(y)
+    y += 22
     footer = (('Tel: 8-364-7561', 'Website: https://sqigroup.ph'),
               ('Office Hours: 9:00 AM – 6:00 PM', 'Monday – Saturday'))
     for left, right_text in footer:
         draw.text((inset, y), left, font=small, fill='black')
-        draw.text((footer_gap, y), right_text, font=small, fill='black')
+        if is_58:
+            y += 20
+            draw.text((inset, y), right_text, font=small, fill='black')
+        else:
+            draw.text((width // 2, y), right_text, font=small, fill='black')
         y += 22
+    y += 6
+    rule(y)
+    y += 16
+    for notice_line in wrapped('THIS DOCUMENT IS NOT VALID FOR CLAIM OF INPUT TAX', small, width - inset * 2):
+        centered(notice_line, y, small)
+        y += 19
     image = image.crop((0, 0, width, y + 22))
     output = io.BytesIO()
     image.save(output, 'PNG')
@@ -314,16 +333,19 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
     @app.post('/api/sales/<int:sid>/printer-copy')
     @signed_in()
     def copy(sid):
+        copy_type = payload().get('copy_type', 'customer')
+        require(copy_type in ('customer', 'store'), 'Choose Customer Copy or Store Copy.')
+        require(copy_type != 'store' or g.user['role'] in ('manager', 'it_admin'), 'Manager access is required for Store Copy.', 403)
         with transaction(db()):
             sale_access(sid)
             row = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=? AND enabled=1', (g.terminal['terminal_id'],)).fetchone()
             require(row, 'An administrator must set up this laptop\'s printer first.', 409)
             pending = db().execute("SELECT 1 FROM receipt_print_jobs WHERE sale_id=? AND status IN ('queued','claimed')", (sid,)).fetchone()
             require(not pending, 'This receipt already has a pending print job. Check print history before making a copy.', 409)
-            job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,paper_size,requested_by_user_id,created_at)
-                VALUES(?,?,'copy',?,?,?,?,?)''', (sid,g.terminal['terminal_id'],row['printer_name'],row['paper_width_mm'],row['paper_size'],g.user['user_id'],now())).lastrowid
-            db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,reason,created_at) VALUES(?,'reprint','windows',?,?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],'Requested another printer copy',now()))
-            event('receipt.copy_queued','receipt_print_jobs',job,after={'sale_id':sid})
+            job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,copy_type,printer_name,paper_width_mm,paper_size,requested_by_user_id,created_at)
+                VALUES(?,?,'copy',?,?,?,?,?,?)''', (sid,g.terminal['terminal_id'],copy_type,row['printer_name'],row['paper_width_mm'],row['paper_size'],g.user['user_id'],now())).lastrowid
+            db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,reason,created_at) VALUES(?,'reprint','windows',?,?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],copy_type.title()+' copy',now()))
+            event('receipt.copy_queued','receipt_print_jobs',job,after={'sale_id':sid,'copy_type':copy_type})
         return jsonify(ok=True)
 
     @app.post('/api/receipt-printer/jobs/<int:job_id>/resolve')
@@ -355,7 +377,7 @@ def register_printing(app, db, transaction, signed_in, require, payload, integer
         if not job:
             return jsonify(job=None)
         try:
-            image = receipt_image(db(),job['sale_id'],job['paper_size'])
+            image = receipt_image(db(),job['sale_id'],job['paper_size'],job['copy_type'])
         except Exception:
             db().execute("UPDATE receipt_print_jobs SET status='failed',error_message='Receipt rendering failed',finished_at=? WHERE receipt_print_job_id=?", (now(),job['receipt_print_job_id']))
             raise

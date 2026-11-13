@@ -487,7 +487,7 @@ class POSTest(unittest.TestCase):
         legacy_db=self.folder/'legacy.sqlite3'
         legacy_schema=Path(__file__).resolve().parent.parent.joinpath('pos','schema.sql').read_text(encoding='utf-8')
         legacy_schema=legacy_schema.replace("role IN ('it_admin','manager','cashier')",
-            "role IN ('manager','cashier')").replace('PRAGMA user_version=10;','PRAGMA user_version=8;')
+            "role IN ('manager','cashier')").replace('PRAGMA user_version=11;','PRAGMA user_version=8;')
         connection=sqlite3.connect(legacy_db)
         try:
             connection.executescript(legacy_schema)
@@ -498,7 +498,7 @@ class POSTest(unittest.TestCase):
         initialize(legacy_db)
         connection=connect(legacy_db)
         try:
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],10)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],11)
             self.assertEqual([tuple(row) for row in connection.execute('SELECT user_id,role FROM users ORDER BY user_id')],[(1,'it_admin'),(2,'cashier')])
             self.assertEqual(connection.execute('SELECT created_by_user_id FROM users WHERE user_id=2').fetchone()[0],1)
             self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(),[])
@@ -693,7 +693,7 @@ class POSTest(unittest.TestCase):
             connection.execute('PRAGMA user_version=4')
         finally:connection.close()
         initialize(self.database)
-        self.assertEqual(self.scalar('PRAGMA user_version'),10)
+        self.assertEqual(self.scalar('PRAGMA user_version'),11)
         self.assertEqual([r['percent_bp'] for r in self.client.get('/api/discount').json['rates']],[1500])
         restored=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET').json
         self.assertEqual(restored['discount_percent_bp'],1500)
@@ -803,10 +803,28 @@ class POSTest(unittest.TestCase):
         self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
         self.call('/sales/'+str(sale)+'/printer-copy',{})
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM receipt_print_jobs'),2)
+        self.assertEqual(self.scalar("SELECT copy_type FROM receipt_print_jobs WHERE job_kind='automatic'"),'customer')
         copy=poll().json['job']
         self.call('/receipt-printer/jobs/'+str(copy['receipt_print_job_id'])+'/resolve',{'reason':'Stopped helper and checked Windows queue'})
         self.call('/receipt-printer/pair',{})
         self.assertEqual(poll().status_code,403)  # Re-pair revokes the old token.
+
+    def test_store_copy_requires_manager_and_keeps_sale_unchanged(self):
+        sale=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
+        cashier,csrf,_=self.second_cashier()
+        self.call('/sales/'+str(sale)+'/reprint',{'copy_type':'store'},client=cashier,csrf=csrf,expected=403)
+        self.call('/sales/'+str(sale)+'/reprint',{'copy_type':'store'})
+        token=self.call('/receipt-printer/pair',{}).json['pairing_token']
+        agent=self.app.test_client()
+        headers={'Authorization':'Bearer '+token}
+        agent.post('/api/print-agent/poll',json={'printers':['USB Receipt']},headers=headers)
+        self.call('/receipt-printer',{'printer_name':'USB Receipt','paper_width_mm':80,'enabled':True},'PUT')
+        self.call('/sales/'+str(sale)+'/printer-copy',{'copy_type':'store'},client=cashier,csrf=csrf,expected=403)
+        self.call('/sales/'+str(sale)+'/printer-copy',{'copy_type':'store'})
+        self.assertEqual(self.scalar("SELECT copy_type FROM receipt_print_jobs WHERE job_kind='copy'"),'store')
+        job=agent.post('/api/print-agent/poll',json={'printers':['USB Receipt']},headers=headers).json['job']
+        self.assertIsNotNone(job['image_base64'])
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),1)
 
     def test_disconnect_printer_revokes_pairing_and_cancels_waiting_receipt(self):
         token=self.call('/receipt-printer/pair',{}).json['pairing_token']

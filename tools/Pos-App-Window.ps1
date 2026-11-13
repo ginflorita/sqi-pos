@@ -24,7 +24,7 @@ function Get-PosAppBrowser {
 }
 
 function Start-PosAppWindow([string]$Url) {
-    if ($Url -notin @('http://localhost:8765', 'https://localhost:8765')) {
+    if (@('http://localhost:8765', 'https://localhost:8765') -notcontains $Url) {
         throw 'The POS app address is invalid.'
     }
     $browser = Get-PosAppBrowser

@@ -28,9 +28,11 @@ def initialize(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
         schema_version = db.execute('PRAGMA user_version').fetchone()[0]
-        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             raise RuntimeError('Unsupported database version. Restore the matching application.')
         db.execute('PRAGMA journal_mode=WAL')
+        if schema_version and 'copy_type' not in {row['name'] for row in db.execute('PRAGMA table_info(receipt_print_jobs)')}:
+            db.execute("ALTER TABLE receipt_print_jobs ADD COLUMN copy_type TEXT NOT NULL DEFAULT 'customer' CHECK(copy_type IN ('customer','store'))")
         if schema_version == 1:
             db.execute("ALTER TABLE receipt_printers ADD COLUMN paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter'))")
             db.execute("ALTER TABLE receipt_print_jobs ADD COLUMN paper_size TEXT NOT NULL DEFAULT 'roll_80' CHECK(paper_size IN ('roll_58','roll_80','letter'))")
