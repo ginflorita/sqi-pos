@@ -19,6 +19,8 @@ certs*/
 exports/
 *.log
 SQI-POS-Second-Laptop.url
+Start SQI POS.lnk
+Open SQI POS.lnk
 .pytest_cache/
 .test-runs/
 .print-helper/

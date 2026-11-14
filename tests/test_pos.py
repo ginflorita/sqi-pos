@@ -192,13 +192,16 @@ class POSTest(unittest.TestCase):
         self.assertEqual(archived['status'],'closed')
         self.assertTrue(archived['archive_backup'])
         self.assertTrue((self.folder/'backups'/archived['archive_backup']).is_file())
-        self.assertEqual(self.client.get('/api/reports?event_id=1').json['summary']['transactions'],1)
+        archived_report=self.client.get('/api/reports?event_id=1').json
+        self.assertEqual(archived_report['summary']['transactions'],1)
+        self.assertEqual(archived_report['event_name'],'Event 1')
         self.assertEqual(self.client.get('/api/reports').json['summary']['transactions'],0)
         self.assertEqual(self.client.get('/api/sales').json['total'],0)
         self.assertEqual(self.client.get('/api/audit').json['events'],[])
         self.call('/events/start',{'event_name':'Next event','manager_password':PASSWORD})
         state=self.client.get('/api/state').json
         self.assertEqual(state['bazaar']['event_name'],'Next event')
+        self.assertEqual(self.client.get('/api/reports').json['event_name'],'Next event')
         self.assertIsNone(state['day'])
         self.assertEqual(self.client.get('/api/catalog').json['products'][0]['quantity_on_hand'],0)
         self.assertEqual(self.client.get('/api/inventory').json['summary']['closing'],0)
@@ -487,7 +490,7 @@ class POSTest(unittest.TestCase):
         legacy_db=self.folder/'legacy.sqlite3'
         legacy_schema=Path(__file__).resolve().parent.parent.joinpath('pos','schema.sql').read_text(encoding='utf-8')
         legacy_schema=legacy_schema.replace("role IN ('it_admin','manager','cashier')",
-            "role IN ('manager','cashier')").replace('PRAGMA user_version=11;','PRAGMA user_version=8;')
+            "role IN ('manager','cashier')").replace('PRAGMA user_version=12;','PRAGMA user_version=8;')
         connection=sqlite3.connect(legacy_db)
         try:
             connection.executescript(legacy_schema)
@@ -498,7 +501,7 @@ class POSTest(unittest.TestCase):
         initialize(legacy_db)
         connection=connect(legacy_db)
         try:
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],11)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],12)
             self.assertEqual([tuple(row) for row in connection.execute('SELECT user_id,role FROM users ORDER BY user_id')],[(1,'it_admin'),(2,'cashier')])
             self.assertEqual(connection.execute('SELECT created_by_user_id FROM users WHERE user_id=2').fetchone()[0],1)
             self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(),[])
@@ -619,8 +622,9 @@ class POSTest(unittest.TestCase):
         self.assertEqual(sale['sale']['discount_percent_bp'],1250)
         self.assertEqual(sale['sale']['total_minor'],32944)
         self.assertEqual(sale['payment']['change_minor'],56)
-        self.call('/discount/'+str(rate_id),{'manager_password':PASSWORD},'DELETE')
+        self.call('/discount/'+str(rate_id),{'active':False,'manager_password':PASSWORD},'PUT')
         self.assertEqual(self.client.get('/api/sales/'+str(sale_id)).json['sale']['discount_percent_bp'],1250)
+        self.assertEqual(self.scalar(f'SELECT active FROM discount_rates WHERE discount_rate_id={rate_id}'),0)
         line=sale['lines'][0]
         self.assertEqual(line['discount_minor'],4706)
         self.assertEqual(line['line_total_minor'],32944)
@@ -661,9 +665,14 @@ class POSTest(unittest.TestCase):
         self.assertEqual(quote['total_minor'],11295)
         self.call('/discount',{'discount_percent_bp':3000,'manager_password':PASSWORD},client=cashier,csrf=csrf,expected=403)
         self.call('/discount',{'discount_percent_bp':3000},expected=403)
-        self.call('/discount/'+str(first),{'manager_password':PASSWORD},'DELETE',cashier,csrf,expected=403)
-        self.call('/discount/'+str(first),{},'DELETE',expected=403)
-        self.call('/discount/'+str(first),{'manager_password':PASSWORD},'DELETE')
+        self.call('/discount/'+str(first),{'active':False,'manager_password':PASSWORD},'PUT',cashier,csrf,expected=403)
+        self.call('/discount/'+str(first),{'active':False},'PUT',expected=403)
+        self.call('/discount/'+str(first),{'active':False,'manager_password':PASSWORD},'PUT')
+        self.assertEqual(self.scalar(f'SELECT COUNT(*) FROM discount_rates WHERE discount_rate_id={first}'),1)
+        self.assertEqual(self.scalar(f'SELECT active FROM discount_rates WHERE discount_rate_id={first}'),0)
+        self.assertEqual([r['percent_bp'] for r in cashier.get('/api/discount').json['rates']],[2000])
+        self.call('/discount',{'discount_percent_bp':1000,'manager_password':PASSWORD},expected=409)
+        self.call('/discount/'+str(first),{'active':False,'manager_password':PASSWORD},'PUT',expected=409)
         self.call('/checkout',self.checkout_body(quote),client=cashier,csrf=csrf,expected=409)
         refreshed=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET',client=cashier,csrf=csrf).json
         self.assertEqual(refreshed['total_minor'],12550)
@@ -672,13 +681,18 @@ class POSTest(unittest.TestCase):
         selected=self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
                            {'version':refreshed['version'],'discount_percent_bp':2000},'PUT',cashier,csrf).json
         self.assertEqual(selected['total_minor'],10040)
-        self.call('/discount/'+str(second),{'manager_password':PASSWORD},'DELETE')
+        self.call('/discount/'+str(second),{'active':False,'manager_password':PASSWORD},'PUT')
         disabled=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET',client=cashier,csrf=csrf).json
         self.assertEqual(disabled['discount_selected'],0)
         self.assertEqual(disabled['total_minor'],12550)
         self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
                   {'version':disabled['version'],'discount_percent_bp':2000},'PUT',cashier,csrf,expected=409)
-        self.assertEqual(self.client.get('/api/discount').json['rates'],[])
+        self.assertEqual([r['active'] for r in self.client.get('/api/discount').json['rates']],[0,0])
+        self.assertEqual(cashier.get('/api/discount').json['rates'],[])
+        self.call('/discount/'+str(first),{'active':True,'manager_password':PASSWORD},'PUT')
+        self.assertEqual([r['percent_bp'] for r in cashier.get('/api/discount').json['rates']],[1000])
+        self.assertEqual(self.scalar(f'SELECT disabled_at IS NULL FROM discount_rates WHERE discount_rate_id={first}'),1)
+        self.call('/discount/'+str(first),{'manager_password':PASSWORD},'DELETE',expected=405)
         self.assertEqual(self.scalar('SELECT COUNT(*) FROM sales'),0)
 
     def test_existing_single_discount_migrates_with_open_ticket(self):
@@ -693,11 +707,24 @@ class POSTest(unittest.TestCase):
             connection.execute('PRAGMA user_version=4')
         finally:connection.close()
         initialize(self.database)
-        self.assertEqual(self.scalar('PRAGMA user_version'),11)
+        self.assertEqual(self.scalar('PRAGMA user_version'),12)
         self.assertEqual([r['percent_bp'] for r in self.client.get('/api/discount').json['rates']],[1500])
         restored=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET').json
         self.assertEqual(restored['discount_percent_bp'],1500)
         self.assertEqual(restored['total_minor'],10667)
+
+    def test_existing_discount_rows_upgrade_as_active(self):
+        rate_id=self.call('/discount',{'discount_percent_bp':500,'manager_password':PASSWORD}).json['discount_rate_id']
+        connection=connect(self.database)
+        try:
+            connection.execute('ALTER TABLE discount_rates DROP COLUMN disabled_at')
+            connection.execute('ALTER TABLE discount_rates DROP COLUMN active')
+            connection.execute('PRAGMA user_version=11')
+        finally:connection.close()
+        initialize(self.database)
+        self.assertEqual(self.scalar('PRAGMA user_version'),12)
+        self.assertEqual(self.scalar(f'SELECT active FROM discount_rates WHERE discount_rate_id={rate_id}'),1)
+        self.assertEqual(self.scalar(f'SELECT disabled_at IS NULL FROM discount_rates WHERE discount_rate_id={rate_id}'),1)
 
     def test_day_two_refund_does_not_rewrite_day_one(self):
         sid=self.call('/checkout',self.checkout_body(self.ticket())).json['sale_id']
@@ -711,6 +738,15 @@ class POSTest(unittest.TestCase):
         day2=self.client.get('/api/reports?from=2026-10-20&to=2026-10-20').json['summary']
         self.assertEqual(day1['net_minor'],12550);self.assertEqual(day1['refunds_minor'],0)
         self.assertEqual(day2['net_minor'],-12550)
+        report=self.client.get('/api/reports').json
+        self.assertEqual([day['business_date'] for day in report['business_days']],['2026-10-19','2026-10-20'])
+        self.assertEqual({row['key']:row['daily'][row['key']] for row in report['days']},{
+            '2026-10-19':{'sales_minor':12550,'refunds_minor':0},
+            '2026-10-20':{'sales_minor':0,'refunds_minor':12550}})
+        for group in ('categories','cashiers','items'):
+            with self.subTest(group=group):
+                self.assertEqual(report[group][0]['daily']['2026-10-19'],{'sales_minor':12550,'refunds_minor':0})
+                self.assertEqual(report[group][0]['daily']['2026-10-20'],{'sales_minor':0,'refunds_minor':12550})
         self.assertEqual(self.scalar('SELECT quantity_on_hand FROM stock_balances'),9)
         response=self.client.get('/api/reports?format=xlsx&from=2026-10-19&to=2026-10-20')
         self.assertEqual(response.status_code,200)
@@ -727,6 +763,15 @@ class POSTest(unittest.TestCase):
             self.assertEqual(workbook['Cashier']['H8'].value,0)
             self.assertEqual(workbook['Days'].freeze_panes,'B8')
         finally:workbook.close()
+
+    def test_report_graph_dates_include_days_without_sales(self):
+        self.call('/checkout',self.checkout_body(self.ticket()))
+        self.call('/shifts/close',{'counted_cash_minor':112550})
+        self.call('/days/close',{'manager_password':PASSWORD})
+        self.call('/days/open',{'business_date':'2026-10-20','manager_password':PASSWORD})
+        report=self.client.get('/api/reports').json
+        self.assertEqual([day['business_date'] for day in report['business_days']],['2026-10-19','2026-10-20'])
+        self.assertEqual(report['items'][0]['daily'],{'2026-10-19':{'sales_minor':12550,'refunds_minor':0}})
 
     def test_failed_checkout_rolls_back_everything(self):
         self.call('/checkout',self.checkout_body(self.ticket(),tendered=1),expected=400)

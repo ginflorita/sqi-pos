@@ -28,7 +28,7 @@ def initialize(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
         schema_version = db.execute('PRAGMA user_version').fetchone()[0]
-        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
             raise RuntimeError('Unsupported database version. Restore the matching application.')
         db.execute('PRAGMA journal_mode=WAL')
         if schema_version and 'copy_type' not in {row['name'] for row in db.execute('PRAGMA table_info(receipt_print_jobs)')}:
@@ -109,6 +109,12 @@ def initialize(path):
                 (SELECT bazaar_id FROM bazaar_days WHERE bazaar_day_id=audit_events.bazaar_day_id),
                 (SELECT bazaar_id FROM bazaars ORDER BY bazaar_id DESC LIMIT 1))
                 WHERE bazaar_id IS NULL''')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='discount_rates'").fetchone():
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(discount_rates)')}
+            if 'active' not in columns:
+                db.execute('ALTER TABLE discount_rates ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1))')
+            if 'disabled_at' not in columns:
+                db.execute('ALTER TABLE discount_rates ADD COLUMN disabled_at TEXT')
         db.executescript(Path(__file__).with_name('schema.sql').read_text(encoding='utf-8'))
         db.execute('INSERT OR IGNORE INTO system_settings(system_setting_id,instance_key,created_at) VALUES(1,?,?)',
                    (secrets.token_hex(24),now()))

@@ -9,7 +9,7 @@ const paths = {
  box:'m3 7 9-4 9 4v10l-9 4-9-4zm0 0 9 4 9-4M12 11v10M7 5l10 4', receipt:'M5 3h14v18l-3-2-4 2-4-2-3 2zm4 5h6M9 12h6M9 16h3',
  chart:'M4 20V4M4 20h17M9 16v-4M14 16V8M19 16V5', users:'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.9M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
  shield:'m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6zm-4 9 3 3 5-6', settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M9 3h6l1 3 3 1 2 5-2 3-1 4-4 2-4-1-3-3-3-2-1-5 3-3z',
- search:'m21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0', arrow:'M4 12h16m-6-6 6 6-6 6', plus:'M12 5v14M5 12h14', close:'m6 6 12 12M6 18 18 6',
+ search:'m21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0', arrow:'M4 12h16m-6-6 6 6-6 6', plus:'M12 5v14M5 12h14', close:'m6 6 12 12M6 18 18 6', eye:'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7zm10 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6', eyeOff:'M3 3l18 18M10.7 5.1A11 11 0 0 1 12 5c6.5 0 10 7 10 7a15 15 0 0 1-3.4 4.2M6 6.5C3.4 8.2 2 12 2 12s3.5 7 10 7c1.5 0 2.8-.4 4-1M9.9 9.9a3 3 0 0 0 4.2 4.2',
  logout:'M9 4H4v16h5M9 12h12m-4-4 4 4-4 4', clock:'M12 8v4l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0', check:'m5 12 4 4L19 6',
  down:'m7 10 5 5 5-5', download:'M12 3v12m-5-5 5 5 5-5M5 17v4h14v-4', print:'M6 9V3h12v6M6 17H3V9h18v8h-3M6 14h12v7H6z',
  leaf:'M20 3c-9-2-17 2-16 9 1 6 8 7 12 3 4-4 4-12 4-12M4 21l11-11', cup:'M5 8h12v9c0 5-12 5-12 0zm12 1h3c3 0 3 6 0 6h-3M8 2v3M13 2v3',
@@ -32,7 +32,8 @@ const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toStr
 const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:location.hash.slice(1)||'reports',products:[],productDrafts:[],categories:[],ticket:null,cart:[],search:'',category:'all',productPage:0,filters:{},online:true,paying:false,cartError:false,receiptPrinter:null};
 const managerAccess=()=>['manager','it_admin'].includes(S.user?.role);
 const roleLabel=user=>({it_admin:'IT System Administrator',manager:'Manager',cashier:'Cashier'})[user?.role]||'Unknown';
-let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, catalogPollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, shiftConfirmationCancel=null, pendingProductImport=null, managementOpen=false, backupPage=0, shiftHistoryPage=1, transactionPage=1, transactionSearch='', catalogSearch='', catalogDraftPage=1, catalogProductPage=1, reportEventId=null, auditEventId=null, inventoryEventId=null, archiveEventName='', bootRetryTimer=null;
+let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, catalogPollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, shiftConfirmationCancel=null, pendingProductImport=null, managementOpen=false, backupPage=0, shiftHistoryPage=1, transactionPage=1, transactionSearch='', catalogSearch='', catalogDraftPage=1, catalogProductPage=1, reportProductPage=1, reportProductScope='', reportEventId=null, auditEventId=null, inventoryEventId=null, archiveEventName='', bootRetryTimer=null;
+const reportGraphSelections={};
 const inventoryFilters={q:'',category_id:'',from:'',to:'',view:'products',product_page:1,movement_page:1};
 let inventoryRenderId=0;
 async function api(path, method='GET', data, isForm=false){
@@ -49,13 +50,14 @@ async function api(path, method='GET', data, isForm=false){
 function toast(message,error=false){const t=$('#toast');t.textContent=message;t.className='show'+(error?' error':'');clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.className='',6000);}
 function updateConnection(){const node=$('#connection-state');if(node)node.innerHTML=`<span class="dot"></span>${S.online?'Local server connected':'Connection lost'}`;const banner=$('#connection-banner');if(banner){banner.hidden=S.online;banner.textContent='Connection lost. Checkout is paused. Reconnect to check your ticket.';}}
 function button(label,action,style='light',i='',extra=''){return `<button type="button" class="btn ${style}" data-action="${action}" ${extra}>${i?icon(i):''}${label}</button>`;}
-function field(label,name,type='text',value='',opts=''){return `<div class="field"><label for="f-${name}">${label}</label><input id="f-${name}" name="${name}" type="${type}" value="${e(value)}" ${opts}></div>`;}
-function approval(){return `<div class="field full"><label for="f-manager_password">Confirm with your manager password</label><input id="f-manager_password" name="manager_password" type="password" autocomplete="current-password" required minlength="12"></div>`;}
+function passwordControl(name,opts=''){return `<div class="password-control"><input id="f-${name}" name="${name}" type="password" ${opts}><button type="button" class="password-toggle" data-action="toggle-password" aria-label="Show password" title="Show password" aria-pressed="false" aria-controls="f-${name}">${icon('eye')}</button></div>`;}
+function field(label,name,type='text',value='',opts=''){return `<div class="field"><label for="f-${name}">${label}</label>${type==='password'?passwordControl(name,opts):`<input id="f-${name}" name="${name}" type="${type}" value="${e(value)}" ${opts}>`}</div>`;}
+function approval(){return `<div class="field full"><label for="f-manager_password">Confirm with your manager password</label>${passwordControl('manager_password','autocomplete="current-password" required minlength="12"')}</div>`;}
 function selectField(label,name,options,selected='',extra=''){return `<div class="field"><label for="f-${name}">${label}</label><select id="f-${name}" name="${name}" ${extra}>${options.map(([v,l])=>`<option value="${e(v)}" ${String(v)===String(selected)?'selected':''}>${e(l)}</option>`).join('')}</select></div>`;}
 function empty(title,description,action='',label=''){return `<div class="empty">${icon('box')}<h3>${e(title)}</h3><p>${e(description)}</p>${action?button(label,action,'green','plus'):''}</div>`;}
 function table(headers,rows){return `<div class="table-scroll"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;}
 function pill(text,style='success'){return `<span class="pill ${style}"><span class="dot"></span>${e(text)}</span>`;}
-function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>${e(title)}</h1><p>${e(description)}</p></div><div class="actions">${actions}</div></div>`;}
+function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>${e(title)}</h1>${description?`<p>${e(description)}</p>`:''}</div><div class="actions">${actions}</div></div>`;}
 function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();if(shiftConfirmationCancel)shiftConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
 function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}if(shiftConfirmationCancel){shiftConfirmationCancel();return;}const wasQuantity=['Choose quantity','Set quantity'].includes($('#modal-title')?.textContent);$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;if(wasQuantity&&S.page==='checkout'){const search=$('#product-search');search?.focus({preventScroll:true});search?.select();}}
 function confirmLogout(){
@@ -580,6 +582,49 @@ function catalogPager(kind,page,total,pageSize){
   const label=kind==='drafts'?'Saved product pages':'Catalog pages';
   return `<nav class="catalog-pager" aria-label="${label}"><button type="button" class="btn light small" data-action="catalog-page" data-kind="${kind}" data-step="-1" ${page<=1?'disabled':''}>Previous</button><span>${num(first)}–${num(last)} of ${num(total)} · Page ${page} of ${pages}</span><button type="button" class="btn light small" data-action="catalog-page" data-kind="${kind}" data-step="1" ${page>=pages?'disabled':''}>Next</button></nav>`;
 }
+function incompleteDrafts(){
+  const drafts=S.productDrafts||[],barcodeCounts=new Map(),categories=new Set(S.categories.filter(c=>c.active).map(c=>c.name.trim().toLocaleLowerCase()));
+  for(const item of [...S.products,...drafts]){
+    const barcode=item.barcode?.trim().toLocaleLowerCase();
+    if(barcode)barcodeCounts.set(barcode,(barcodeCounts.get(barcode)||0)+1);
+  }
+  return drafts.map(d=>{
+    const missing=[];
+    if(!d.sku?.trim())missing.push('Item code');
+    if(!d.description?.trim())missing.push('Description');
+    if(!d.barcode?.trim())missing.push('Barcode');
+    else if(barcodeCounts.get(d.barcode.trim().toLocaleLowerCase())>1||/duplicate barcode/i.test(d.import_issue||''))missing.push('Unique barcode');
+    if(!d.category_name?.trim()||!categories.has(d.category_name.trim().toLocaleLowerCase()))missing.push('Category');
+    if(!d.unit?.trim())missing.push('Unit');
+    if(!(d.unit_price_minor>0))missing.push('Unit price');
+    if(!(d.amount_minor>0))missing.push('Selling price');
+    return {draft:d,missing};
+  }).filter(item=>item.missing.length);
+}
+function printIncompleteDrafts(){
+  const rows=incompleteDrafts();
+  if(!rows.length){toast('No saved products have incomplete details.');return;}
+  const printedOn=new Intl.DateTimeFormat('en',{timeZone:S.bazaar?.timezone||'Asia/Manila',dateStyle:'medium'}).format(new Date());
+  const entries=rows.map(({draft:d,missing})=>`<tr><td>${e(d.sku||'')}</td><td>${missing.includes('Barcode')||missing.includes('Unique barcode')?'':e(d.barcode||'')}</td><td>${e(d.description||'')}</td><td>${missing.includes('Category')?'':e(d.category_name||'')}</td><td>${e(d.unit||'')}</td><td>${d.unit_price_minor>0?money(d.unit_price_minor):''}</td><td>${d.amount_minor>0?money(d.amount_minor):''}</td></tr>`).join('');
+  const body=`<section class="product-print-sheet draft-print-sheet"><h1>Products saved for later</h1><p>${e(S.bazaar?.event_name||'SQI POS')} · ${e(printedOn)} · ${num(rows.length)} incomplete products from all pages</p><div class="table-scroll"><table class="product-print-table"><thead><tr><th>Item code</th><th>Barcode</th><th>Description</th><th>Category</th><th>Unit</th><th>Unit price</th><th>Selling price</th></tr></thead><tbody>${entries}</tbody></table></div></section><div class="modal-actions">${button('Close','close-modal','light')}${button('Print list','print-product-sheet','green','print','data-title="Products saved for later"')}</div>`;
+  modal('Print incomplete saved products',body,true);
+}
+function printProductCatalog(){
+  if(!S.products.length){toast('No products to print.');return;}
+  const printedOn=new Intl.DateTimeFormat('en',{timeZone:S.bazaar?.timezone||'Asia/Manila',dateStyle:'medium'}).format(new Date());
+  const entries=S.products.map(p=>`<tr><td>${e(p.sku)}</td><td>${e(p.barcode||'')}</td><td>${e(p.description)}</td><td>${e(p.category_name)}</td><td>${e(p.unit)}</td><td>${money(p.unit_price_minor)}</td><td>${money(p.selling_price_minor??p.amount_minor)}</td><td>${num(p.quantity_on_hand)}</td><td>${p.active?'Active':'Inactive'}</td></tr>`).join('');
+  const body=`<section class="product-print-sheet catalog-print-sheet"><h1>Product catalog</h1><p>${e(S.bazaar?.event_name||'SQI POS')} · ${e(printedOn)} · ${num(S.products.length)} products from all pages</p><div class="table-scroll"><table class="product-print-table"><thead><tr><th>Item code</th><th>Barcode</th><th>Description</th><th>Category</th><th>Unit</th><th>Unit price</th><th>Selling price</th><th>On hand</th><th>Status</th></tr></thead><tbody>${entries}</tbody></table></div></section><div class="modal-actions">${button('Close','close-modal','light')}${button('Print catalog','print-product-sheet','green','print','data-title="Product catalog"')}</div>`;
+  modal('Print product catalog',body,true);
+}
+function printProductSheet(title){
+  const previousTitle=document.title,pageStyle=document.createElement('style');
+  pageStyle.textContent='@page{size:A4 landscape;margin:7mm}';
+  document.head.appendChild(pageStyle);
+  document.title=title;
+  const restore=()=>{document.title=previousTitle;pageStyle.remove();};
+  window.addEventListener('afterprint',restore,{once:true});
+  try{window.print();}catch(error){window.removeEventListener('afterprint',restore);restore();throw error;}
+}
 async function renderCatalog(reload=true){
   if(reload)await loadCatalog();
   const drafts=S.productDrafts||[],pageSize=10,needle=catalogSearch.trim().toLocaleLowerCase();
@@ -589,11 +634,11 @@ async function renderCatalog(reload=true){
   catalogProductPage=Math.min(catalogProductPage,Math.max(1,Math.ceil(matchingProducts.length/pageSize)));
   const visibleDrafts=matchingDrafts.slice((catalogDraftPage-1)*pageSize,catalogDraftPage*pageSize);
   const visibleProducts=matchingProducts.slice((catalogProductPage-1)*pageSize,catalogProductPage*pageSize);
-  const draftRows=visibleDrafts.map(d=>`<tr><td><strong>${e(d.sku)}</strong></td><td class="catalog-description" title="${e(d.description)}"><strong>${e(d.description)}</strong>${d.short_description&&d.short_description.trim().toLocaleLowerCase()!==d.description.trim().toLocaleLowerCase()?`<small>${e(d.short_description)}</small>`:''}</td><td>${e(d.category_name||'—')}</td><td>${d.unit_price_minor?money(d.unit_price_minor):'—'}</td><td>${pill(d.import_issue||'Set up later','warn')}</td><td>${button('Set up','complete-product','green small','edit',`data-id="${d.product_import_draft_id}"`)}</td></tr>`);
-  const productRows=visibleProducts.map(p=>`<tr><td><div class="table-product"><div class="cart-thumb">${productVisual(p)}</div><div class="catalog-product-text" title="${e(p.description)}"><strong>${e(p.description)}</strong><small>${e(p.sku)}${p.barcode?' · '+e(p.barcode):''}${p.short_description&&p.short_description.trim().toLocaleLowerCase()!==p.description.trim().toLocaleLowerCase()?' · '+e(p.short_description):''}</small></div></div></td><td>${e(p.category_name)}</td><td>${money(p.unit_price_minor)}</td><td>${money(p.selling_price_minor??p.amount_minor)}</td><td>${p.quantity_on_hand} ${e(p.unit)}</td><td>${pill(p.active?'Active':'Inactive',p.active?'success':'warn')}</td><td>${button('Edit','edit-product','light small','edit',`data-id="${p.product_id}"`)}</td></tr>`);
+  const draftRows=visibleDrafts.map(d=>`<tr><td><strong>${e(d.sku)}</strong></td><td class="catalog-barcode">${d.barcode?e(d.barcode):'<span class="muted">Not assigned</span>'}</td><td class="catalog-description" title="${e(d.description)}"><strong>${e(d.description)}</strong>${d.short_description&&d.short_description.trim().toLocaleLowerCase()!==d.description.trim().toLocaleLowerCase()?`<small>${e(d.short_description)}</small>`:''}</td><td>${e(d.category_name||'—')}</td><td>${d.unit_price_minor?money(d.unit_price_minor):'—'}</td><td>${pill(d.import_issue||'Set up later','warn')}</td><td>${button('Set up','complete-product','green small','edit',`data-id="${d.product_import_draft_id}"`)}</td></tr>`);
+  const productRows=visibleProducts.map(p=>`<tr><td><div class="table-product"><div class="cart-thumb">${productVisual(p)}</div><div class="catalog-product-text" title="${e(p.description)}"><strong>${e(p.description)}</strong><small>${e(p.sku)}${p.short_description&&p.short_description.trim().toLocaleLowerCase()!==p.description.trim().toLocaleLowerCase()?' · '+e(p.short_description):''}</small></div></div></td><td class="catalog-barcode">${p.barcode?e(p.barcode):'<span class="muted">Not assigned</span>'}</td><td>${e(p.category_name)}</td><td>${money(p.unit_price_minor)}</td><td>${money(p.selling_price_minor??p.amount_minor)}</td><td>${p.quantity_on_hand} ${e(p.unit)}</td><td>${pill(p.active?'Active':'Inactive',p.active?'success':'warn')}</td><td>${button('Edit','edit-product','light small','edit',`data-id="${p.product_id}"`)}</td></tr>`);
   const searchForm=`<form id="catalog-search" class="catalog-search" role="search"><label for="catalog-query">Search all products</label><div class="catalog-search-controls"><input id="catalog-query" type="search" value="${e(catalogSearch)}" placeholder="SKU, barcode, description or category" maxlength="120" autocomplete="off"><button class="btn green" type="submit">${icon('search')}Search</button>${catalogSearch?button('Clear','catalog-clear-search','light small','close'):''}</div></form>`;
-  const draftPanel=drafts.length?`<section class="panel catalog-panel catalog-drafts"><div class="panel-title"><h2>Products saved for later <span class="count-bubble">${num(drafts.length)}</span></h2><span class="muted">${catalogSearch?`${num(matchingDrafts.length)} matching`:'Added and saved · set up anytime'}</span></div>${draftRows.length?table(['SKU','Description','Category','Unit price','Status',''],draftRows):empty('No saved products match','Try another search.')}${catalogPager('drafts',catalogDraftPage,matchingDrafts.length,pageSize)}</section>`:'';
-  const productPanel=`<section class="panel catalog-panel catalog-products"><div class="panel-title"><h2>Product catalog <span class="count-bubble">${num(S.products.length)}</span></h2><span class="muted">${catalogSearch?`${num(matchingProducts.length)} matching`:'Unit price is locked; selling price can change'}</span></div>${productRows.length?table(['Product','Category','Unit price','Selling price','On hand','Status',''],productRows):S.products.length?empty('No products match','Try another search.'):empty('Start with your first product','Add one product or upload an Excel product list.','new-product','Add product')}${catalogPager('products',catalogProductPage,matchingProducts.length,pageSize)}</section>`;
+  const draftPanel=drafts.length?`<section class="panel catalog-panel catalog-drafts"><div class="panel-title"><h2>Products saved for later <span class="count-bubble">${num(drafts.length)}</span></h2><div class="actions"><span class="muted">${catalogSearch?`${num(matchingDrafts.length)} matching`:'Added and saved · set up anytime'}</span>${button('Print incomplete list','print-incomplete-drafts','light small','print')}</div></div>${draftRows.length?table(['SKU','Barcode','Description','Category','Unit price','Status',''],draftRows):empty('No saved products match','Try another search.')}${catalogPager('drafts',catalogDraftPage,matchingDrafts.length,pageSize)}</section>`:'';
+  const productPanel=`<section class="panel catalog-panel catalog-products"><div class="panel-title"><h2>Product catalog <span class="count-bubble">${num(S.products.length)}</span></h2><div class="actions"><span class="muted">${catalogSearch?`${num(matchingProducts.length)} matching`:'Unit price is locked; selling price can change'}</span>${S.products.length?button('Print catalog','print-product-catalog','light small','print'):''}</div></div>${productRows.length?table(['Product','Barcode','Category','Unit price','Selling price','On hand','Status',''],productRows):S.products.length?empty('No products match','Try another search.'):empty('Start with your first product','Add one product or upload an Excel product list.','new-product','Add product')}${catalogPager('products',catalogProductPage,matchingProducts.length,pageSize)}</section>`;
   $('#page').innerHTML=heading('Your products','A home for everything on your shelf.',button('New category','new-category','light','plus')+button('Add from Excel','bulk-upload-products','light','download')+button('Add product','new-product','green','plus'))+searchForm+draftPanel+productPanel;
   $('#catalog-search').addEventListener('submit',async ev=>{ev.preventDefault();catalogSearch=$('#catalog-query').value.trim();catalogDraftPage=1;catalogProductPage=1;try{await renderCatalog(false);}catch(error){toast(error.message,true);}});
 }
@@ -712,10 +757,69 @@ async function renderTransactions(){
   $('#page').innerHTML=heading('Every sale has a story.','Open a receipt to review its items, payment, and linked corrections.',button('Clear filters','clear-filters','light','refresh'))+filters+`<div class="panel transaction-panel"><div class="panel-title"><h2>Transaction history</h2><span class="muted">${num(total)} matching ${total===1?'sale':'sales'}</span></div><form id="transaction-search" class="transaction-search" role="search"><label for="transaction-query">Search sales</label><div class="transaction-search-controls"><input id="transaction-query" type="search" value="${e(transactionSearch)}" placeholder="Receipt, cashier, product or SKU" maxlength="120" autocomplete="off"><button class="btn green" type="submit">${icon('search')}Search</button></div></form>${rows.length?table(['Receipt','Day / time','Cashier','Total','Refunded',''],rows):empty('No sales in this view','Try another search or change the filters.')}<nav class="transaction-pager" aria-label="Transaction pages"><button type="button" class="btn light small" data-action="transaction-page" data-step="-1" ${page<=1?'disabled':''}>Previous</button><span>${num(start)}–${num(end)} of ${num(total)} · Page ${page} of ${pages}</span><button type="button" class="btn light small" data-action="transaction-page" data-step="1" ${page>=pages?'disabled':''}>Next</button></nav></div>`;
   $('#transaction-search').addEventListener('submit',async ev=>{ev.preventDefault();transactionSearch=$('#transaction-query').value.trim();transactionPage=1;try{await renderTransactions();}catch(error){toast(error.message,true);}});
 }
-async function renderReports(){const filters=await filterBar();const r=await api('/reports?'+queryString());const t=r.summary;const reportMoney=n=>new Intl.NumberFormat('en',{style:'currency',currency:r.currency_code||'PHP'}).format((n||0)/100);
+function reportGraph(section,rows,businessDays,reportMoney,currencyCode){
+  const names={days:'Business day',categories:'Category',cashiers:'Cashier',items:'Product'};
+  if(!Array.isArray(businessDays))return empty('Graph data needs a server restart','Restart the local POS server, then refresh this page.');
+  const selected=section==='days'?null:rows.find(row=>String(row.key)===reportGraphSelections[section])||rows[0];
+  if(selected)reportGraphSelections[section]=String(selected.key);
+  if(!businessDays.length)return empty('No business days in this view','Open a business day or change the date filters to see a trend.');
+  if(section!=='days'&&!selected)return empty('No activity in this view','Sales and returns will appear here.');
+  const points=businessDays.map(day=>{
+    const daily=section==='days'?rows.find(row=>String(row.key)===day.business_date):selected.daily?.[day.business_date];
+    const sales=daily?.sales_minor||0, refunds=daily?.refunds_minor||0;
+    return {label:`Day ${day.day_number}`,date:day.business_date,net:sales-refunds};
+  });
+  const values=points.map(point=>point.net), low=Math.min(0,...values), high=Math.max(0,...values);
+  const margin=Math.max((high-low)*.12,1), yMin=low<0?low-margin:0, yMax=high>0?high+margin:margin;
+  const width=Math.max(640,points.length*78), left=53, right=20, top=20, bottom=181;
+  const x=index=>points.length===1?width/2:left+index*(width-left-right)/(points.length-1);
+  const y=value=>top+(yMax-value)*(bottom-top)/(yMax-yMin);
+  const pos=value=>Number(value.toFixed(1));
+  const axisValue=value=>new Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:1}).format(value/100);
+  const grid=Array.from({length:5},(_,index)=>{
+    const value=yMax-(yMax-yMin)*index/4, py=pos(y(value));
+    return `<line x1="${left}" y1="${py}" x2="${width-right}" y2="${py}" class="report-graph-grid"/><text x="${left-10}" y="${py+4}" text-anchor="end" class="report-graph-axis">${e(axisValue(value))}</text>`;
+  }).join('');
+  const line=points.length>1?`<polyline class="report-graph-line" points="${points.map((point,index)=>`${pos(x(index))},${pos(y(point.net))}`).join(' ')}"/>`:'';
+  const dots=points.map((point,index)=>`<circle class="report-graph-dot" cx="${pos(x(index))}" cy="${pos(y(point.net))}" r="5"><title>${e(point.label+' · '+point.date+': '+reportMoney(point.net))}</title></circle><text x="${pos(x(index))}" y="${bottom+25}" text-anchor="middle" class="report-graph-axis">${e(point.label)}</text>`).join('');
+  const total=values.reduce((sum,value)=>sum+value,0), change=values.at(-1)-values[0];
+  const changeLabel=points.length<2?'Need two days to compare':change>0?`Up ${reportMoney(change)}`:change<0?`Down ${reportMoney(-change)}`:'No change';
+  const picker=section==='days'?'':`<label class="report-graph-picker">${names[section]}<select data-report-graph-select="${section}" aria-label="Choose ${names[section].toLowerCase()} for sales graph">${rows.map(row=>`<option value="${e(row.key)}" ${row===selected?'selected':''}>${e(row.label)}</option>`).join('')}</select></label>`;
+  const daily=points.map((point,index)=>{
+    const difference=index?point.net-points[index-1].net:0;
+    const movement=index?(difference>0?`Up ${reportMoney(difference)}`:difference<0?`Down ${reportMoney(-difference)}`:'No change'):'First day';
+    const direction=!index||!difference?'flat':difference>0?'up':'down';
+    return `<li><span>${e(point.label)} · ${e(point.date)}</span><strong>${reportMoney(point.net)}</strong><small class="${direction}">${movement}</small></li>`;
+  }).join('');
+  return `<div class="report-graph">${picker}<p class="report-graph-note">Net sales after refunds · ${e(currencyCode)}</p><div class="report-graph-stats"><div><span>Total net sales</span><strong>${reportMoney(total)}</strong></div><div><span>Latest business day</span><strong>${reportMoney(values.at(-1))}</strong></div><div><span>First to latest</span><strong class="${change>0?'up':change<0?'down':''}">${changeLabel}</strong></div></div><div class="report-graph-scroll"><svg viewBox="0 0 ${width} 220" style="width:${width}px" role="img" aria-label="${e((selected?.label||'All sales')+' net sales by business day')}">${grid}${line}${dots}</svg></div><ol class="report-graph-days">${daily}</ol></div>`;
+}
+
+function reportGraphBody(section,r){
+  const reportMoney=n=>new Intl.NumberFormat('en',{style:'currency',currency:r.currency_code||'PHP'}).format((n||0)/100);
+  return reportGraph(section,r[section],r.business_days,reportMoney,r.currency_code||'PHP');
+}
+
+async function openReportGraph(section){
+  const titles={days:'By business day',categories:'By category',cashiers:'By cashier',items:'By product'};
+  if(!titles[section]||S.page!=='reports')return;
+  const r=await api('/reports?'+queryString());
+  modal(`${titles[section]} · Sales graph`,reportGraphBody(section,r),true);
+  $('.modal')?.classList.add('report-graph-modal');
+}
+
+async function renderReports(){const filters=await filterBar();const reportQuery=queryString();const r=await api('/reports?'+reportQuery);const t=r.summary;const reportMoney=n=>new Intl.NumberFormat('en',{style:'currency',currency:r.currency_code||'PHP'}).format((n||0)/100);
+  const scope=JSON.stringify([reportEventId||S.bazaar?.bazaar_id||null,reportQuery]);
+  if(scope!==reportProductScope){reportProductScope=scope;reportProductPage=1;}
+  const productPageSize=10,productTotal=r.items.length,productPages=Math.max(1,Math.ceil(productTotal/productPageSize));
+  reportProductPage=Math.min(reportProductPage,productPages);
+  const productFirst=(reportProductPage-1)*productPageSize,productRows=r.items.slice(productFirst,productFirst+productPageSize);
+  const productPager=productTotal>productPageSize?`<nav class="report-product-pager" aria-label="Report product pages">${button('Previous','report-product-page','light small','',`data-step="-1" ${reportProductPage===1?'disabled':''}`)}<span>${num(productFirst+1)}–${num(Math.min(productFirst+productPageSize,productTotal))} of ${num(productTotal)} · Page ${reportProductPage} of ${productPages}</span>${button('Next','report-product-page','light small','',`data-step="1" ${reportProductPage===productPages?'disabled':''}`)}</nav>`:'';
   const unitLabel=(count,action)=>`${num(count)} ${count===1?'unit':'units'} ${action}`;
-  const reportTable=(title,rows)=>`<div class="panel"><div class="panel-title"><h2>${title}</h2></div>${rows.length?table(['Description','Unit counts','Sales','Refunds','Net'],rows.map(r=>`<tr><td><strong>${e(r.label)}</strong></td><td><div class="report-unit-count"><strong>${unitLabel(r.units,'sold')}</strong>${r.returned_units?`<span>${unitLabel(r.returned_units,'returned or voided')}</span>`:''}</div></td><td>${reportMoney(r.sales_minor)}</td><td>${reportMoney(r.refunds_minor)}</td><td><strong>${reportMoney(r.sales_minor-r.refunds_minor)}</strong></td></tr>`)):empty('No activity in this view','Sales and returns will appear here.')}</div>`;
-  $('#page').innerHTML=heading(reportEventId?'Archived report: '+archiveEventName:'A good look at your day.','Follow the numbers from each business day to every item.',(reportEventId?button('Current event','current-report','light','refresh'):'')+button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${queryString()}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${reportMoney(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Gross sales</label><div class="value">${reportMoney(t.gross_minor)}</div><small>${unitLabel(t.units,'sold')} · ${t.transactions} transactions</small></div><div class="stat"><label>Refunds</label><div class="value">${reportMoney(t.refunds_minor)}</div><small>${unitLabel(t.returned_units,'returned or voided')}</small></div><div class="stat"><label>Average sale</label><div class="value">${reportMoney(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportTable('By business day',r.days)+`<div class="two-col">${reportTable('By category',r.categories)}${reportTable('By cashier',r.cashiers)}</div>`+reportTable('By product',r.items)+`<p class="muted"><small>Refunds belong to the day and cashier that processed them. Categories use the label recorded when sold. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
+  const reportSection=(title,section,rows,footer='',extraClass='')=>{
+    const records=rows.length?table(['Description','Unit counts','Sales','Refunds','Net'],rows.map(row=>`<tr><td><strong>${e(row.label)}</strong></td><td><div class="report-unit-count"><strong>${unitLabel(row.units,'sold')}</strong>${row.returned_units?`<span>${unitLabel(row.returned_units,'returned or voided')}</span>`:''}</div></td><td>${reportMoney(row.sales_minor)}</td><td>${reportMoney(row.refunds_minor)}</td><td><strong>${reportMoney(row.sales_minor-row.refunds_minor)}</strong></td></tr>`)):empty('No activity in this view','Sales and returns will appear here.');
+    return `<section class="panel report-section ${extraClass}"><div class="panel-title"><h2>${title}</h2>${button('Show graph','open-report-graph','light small','chart',`data-section="${section}" aria-haspopup="dialog"`)}</div>${records+footer}</section>`;
+  };
+  $('#page').innerHTML=heading(r.event_name||'Reports','',(reportEventId?button('Current event','current-report','light','refresh'):'')+button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${reportQuery}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${reportMoney(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Gross sales</label><div class="value">${reportMoney(t.gross_minor)}</div><small>${unitLabel(t.units,'sold')} · ${t.transactions} transactions</small></div><div class="stat"><label>Refunds</label><div class="value">${reportMoney(t.refunds_minor)}</div><small>${unitLabel(t.returned_units,'returned or voided')}</small></div><div class="stat"><label>Average sale</label><div class="value">${reportMoney(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportSection('By business day','days',r.days)+`<div class="two-col">${reportSection('By category','categories',r.categories)}${reportSection('By cashier','cashiers',r.cashiers)}</div>`+reportSection('By product','items',productRows,productPager,'report-products')+`<p class="muted"><small>Refunds belong to the day and cashier that processed them. Categories use the label recorded when sold. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
 }
 async function renderShifts(){
   const pageSize=10;
@@ -802,7 +906,7 @@ function userForm(uid){
   if(locked&&uid!==S.user.user_id)return toast('Only ginflorita can update this account.',true);
   const roleField=locked?'<div class="field"><label>Role</label><span>IT System Administrator (locked)</span><input type="hidden" name="role" value="it_admin"></div>':selectField('Role','role',[['cashier','Cashier'],['manager','Manager']],u?.role||'cashier');
   const statusField=locked?'<div class="field"><label>Status</label><span>Active (locked)</span><input type="hidden" name="active" value="true"></div>':selectField('Status','active',[['true','Active'],['false','Disabled']],String(u?!!u.active:true));
-  formModal(u?'Manage account':'Create an account',field('Display name','display_name','text',u?.display_name||'','required')+(u?`<div class="field"><label>Username</label><input value="${e(u.username)}" disabled></div>`:field('Username','username','text','','required minlength="3" maxlength="50"'))+roleField+statusField+`<div class="field full"><label for="f-password">${u?'New password (leave blank to keep current)':'Password'}</label><input type="password" name="password" id="f-password" autocomplete="new-password" minlength="12" ${u?'':'required'}></div>${locked?'<div class="field full"><small>Only ginflorita can update this account. Its role and active status are locked.</small></div>':''}`+approval(),async data=>{await api(u?'/users/'+uid:'/users',u?'PUT':'POST',{...data,active:data.active==='true'});closeModal();await renderTeam();toast('Account saved.');},'Save account');
+  formModal(u?'Manage account':'Create an account',field('Display name','display_name','text',u?.display_name||'','required')+(u?`<div class="field"><label>Username</label><input value="${e(u.username)}" disabled></div>`:field('Username','username','text','','required minlength="3" maxlength="50"'))+roleField+statusField+`<div class="field full"><label for="f-password">${u?'New password (leave blank to keep current)':'Password'}</label>${passwordControl('password',`autocomplete="new-password" minlength="12" ${u?'':'required'}`)}</div>${locked?'<div class="field full"><small>Only ginflorita can update this account. Its role and active status are locked.</small></div>':''}`+approval(),async data=>{await api(u?'/users/'+uid:'/users',u?'PUT':'POST',{...data,active:data.active==='true'});closeModal();await renderTeam();toast('Account saved.');},'Save account');
 }
 function auditActionLabel(action){return ({'shift.closed_by_manager':'Manager closed shift','shift.closed':'Cashier closed shift'})[action]||action.replace(/[._]/g,' ').replace(/^./,c=>c.toUpperCase());}
 function auditRecordLabel(a){if(a.entity_type==='shifts')return `Shift #${a.entity_key}`;if(a.entity_type==='bazaars')return `Event #${a.entity_key}`;if(a.entity_type==='bazaar_days')return `Business day #${a.entity_key}`;return `${a.entity_type.replaceAll('_',' ')} ${a.entity_key||''}`.trim();}
@@ -917,6 +1021,7 @@ document.addEventListener('click',async ev=>{
     const action=target.dataset.action;if(!action)return;
     const id=Number(target.dataset.id);
     const actions={
+      'toggle-password':()=>{const input=document.getElementById(target.getAttribute('aria-controls'));if(!input)return;const visible=input.type==='password';input.type=visible?'text':'password';target.setAttribute('aria-pressed',String(visible));target.setAttribute('aria-label',visible?'Hide password':'Show password');target.title=visible?'Hide password':'Show password';target.innerHTML=icon(visible?'eyeOff':'eye');},
       'checkout-fullscreen':openCheckoutFullscreen,'toggle-checkout-fullscreen':()=>checkoutFullscreen?leaveCheckoutFullscreen():enterCheckoutFullscreen(),'toggle-management':toggleManagement,
       'close-modal':closeModal,'boot':boot,'open-day':openDay,'open-shift':openShift,'close-shift':closeShift,'day-steps':async()=>{if(S.paying)return;await cartQueue;return navigate('management');},'pay':paymentModal,
       'go-to-events':()=>{closeModal();return navigate('events');},
@@ -933,7 +1038,12 @@ document.addEventListener('click',async ev=>{
       'refresh-page':()=>navigate(S.page),'backup-page':()=>{backupPage+=Number(target.dataset.step);return renderBackups();},
       'catalog-page':async()=>{const kind=target.dataset.kind;if(kind==='drafts')catalogDraftPage=Math.max(1,catalogDraftPage+Number(target.dataset.step));else catalogProductPage=Math.max(1,catalogProductPage+Number(target.dataset.step));await renderCatalog(false);$(kind==='drafts'?'.catalog-drafts':'.catalog-products')?.scrollIntoView({block:'start'});},
       'catalog-clear-search':()=>{catalogSearch='';catalogDraftPage=1;catalogProductPage=1;return renderCatalog(false);},
+      'print-incomplete-drafts':printIncompleteDrafts,
+      'print-product-catalog':printProductCatalog,
+      'print-product-sheet':()=>printProductSheet(target.dataset.title||'Products'),
       'transaction-page':async()=>{transactionPage=Math.max(1,transactionPage+Number(target.dataset.step));await renderTransactions();$('.transaction-panel')?.scrollIntoView({block:'start'});},
+      'report-product-page':async()=>{reportProductPage=Math.max(1,reportProductPage+Number(target.dataset.step));await renderReports();$('.report-products')?.scrollIntoView({block:'start'});},
+      'open-report-graph':()=>openReportGraph(target.dataset.section),
       'inventory-view':()=>{inventoryFilters.view=target.dataset.view;return renderInventory();},
       'inventory-page':()=>{const key=target.dataset.kind==='product'?'product_page':'movement_page';inventoryFilters[key]=Math.max(1,inventoryFilters[key]+Number(target.dataset.step));return renderInventory();},
       'inventory-clear':()=>{Object.assign(inventoryFilters,{q:'',category_id:'',from:'',to:'',product_page:1,movement_page:1});return renderInventory();},
@@ -945,7 +1055,7 @@ document.addEventListener('click',async ev=>{
       'new-category':()=>formModal('Add a category',field('Category name','name','text','','required'),async data=>{await api('/categories','POST',data);closeModal();await renderCatalog();toast('Category added.');},'Add category'),
       'close-day':()=>managerAction(`Close Day ${S.day?.day_number||''}`,'All cashier shifts and unpaid orders must be closed. The POS will create a backup, then you can open the next day here.','/days/close'),
       'backup':()=>managerAction('Create backup','Create and verify a snapshot of the live database, including product images.','/backups'),
-      'add-discount':discountForm,'delete-discount':()=>deleteDiscount(id),
+      'add-discount':discountForm,'disable-discount':()=>setDiscountActive(id,false),'enable-discount':()=>setDiscountActive(id,true),
       'pair-printer':pairPrinter,'configure-printer':configurePrinter,'disconnect-printer':disconnectPrinter,'refresh-printers':renderPrinter,'start-print-helper':startPrintHelper,'resolve-print':()=>resolvePrint(id),'printer-copy':()=>queuePrinterCopy(id,target.dataset.copy||'customer'),
       'print-receipt':async()=>{
         target.disabled=true;
@@ -966,6 +1076,17 @@ document.addEventListener('click',async ev=>{
   }catch(error){toast(error.message,true);}
 });
 document.addEventListener('change',async ev=>{
+  if(ev.target.dataset.reportGraphSelect){
+    const section=ev.target.dataset.reportGraphSelect;
+    if(!['categories','cashiers','items'].includes(section))return;
+    reportGraphSelections[section]=ev.target.value;
+    const body=$('.report-graph-modal .modal-body');
+    if(body){
+      try{const r=await api('/reports?'+queryString());body.innerHTML=reportGraphBody(section,r);$('[data-report-graph-select]',body)?.focus({preventScroll:true});}
+      catch(error){toast(error.message,true);}
+    }
+    return;
+  }
   if(ev.target.id==='checkout-category'){
     S.category=ev.target.value;S.productPage=0;renderProducts();
     $('#product-grid')?.scrollTo({top:0});$('#product-search')?.focus({preventScroll:true});
@@ -995,7 +1116,7 @@ boot();
 
 function discountSettingsPanel(config){
   const rates=config.rates||[];
-  return `<div class="panel discount-panel"><div class="panel-title"><h2>Available rates</h2>${button('Add rate','add-discount','green','plus')}</div><div class="discount-list">${rates.length?rates.map(rate=>`<div class="discount-rate-row"><strong>${percentLabel(rate.percent_bp)}</strong>${button('Delete','delete-discount','light small','close',`data-id="${rate.discount_rate_id}"`)}</div>`).join(''):'<p class="muted">No rates yet. Add a percentage for cashiers to choose.</p>'}</div><p class="list-note">Removing a rate clears it from open orders. Completed receipts keep the rate already charged.</p></div>`;
+  return `<div class="panel discount-panel"><div class="panel-title"><h2>Checkout rates</h2>${button('Add rate','add-discount','green','plus')}</div><div class="discount-list">${rates.length?rates.map(rate=>`<div class="discount-rate-row ${rate.active?'':'discount-rate-disabled'}"><div><strong>${percentLabel(rate.percent_bp)}</strong>${rate.active?'':`<span class="pill warn">Disabled</span>`}</div>${button(rate.active?'Disable':'Enable',rate.active?'disable-discount':'enable-discount','light small',rate.active?'close':'check',`data-id="${rate.discount_rate_id}"`)}</div>`).join(''):'<p class="muted">No rates yet. Add a percentage for cashiers to choose.</p>'}</div><p class="list-note">Disabling a rate clears it from open orders. Completed receipts keep the rate already charged. Disabled rates stay here and can be enabled again.</p></div>`;
 }
 async function discountForm(){
   formModal('Add checkout discount',field('Discount percentage','percentage','number','','required min="0.01" max="99" step="0.01"')+`<div class="field full"><small>Add a rate from 0.01% to 99%. Cashiers will see it in the order discount list.</small></div>`+approval(),async data=>{
@@ -1005,13 +1126,13 @@ async function discountForm(){
     closeModal();await renderDiscounts();toast('Discount rate added.');
   },'Add rate');
 }
-async function deleteDiscount(id){
+async function setDiscountActive(id,active){
   const {rates}=await api('/discount'),rate=rates.find(item=>item.discount_rate_id===id);
-  requireClient(rate,'This discount rate is no longer available. Refresh Discounts.');
-  formModal('Delete '+percentLabel(rate.percent_bp)+' discount',`<div class="field full"><p>Cashiers will no longer be able to choose this rate. Open orders using it will return to no discount and must be reviewed before payment. Completed receipts keep the discount already charged.</p></div>`+approval(),async data=>{
-    await api('/discount/'+id,'DELETE',{manager_password:data.manager_password});
-    closeModal();await renderDiscounts();toast(percentLabel(rate.percent_bp)+' discount removed.');
-  },'Delete rate');
+  requireClient(rate&&Boolean(rate.active)!==active,'This discount rate changed. Refresh Discounts.');
+  formModal((active?'Enable ':'Disable ')+percentLabel(rate.percent_bp)+' discount',`<div class="field full"><p>${active?'Cashiers will be able to choose this rate again.':'Cashiers will no longer be able to choose this rate. Open orders using it will return to no discount and must be reviewed before payment. Completed receipts keep the discount already charged. You can enable this rate again later.'}</p></div>`+approval(),async data=>{
+    await api('/discount/'+id,'PUT',{active,manager_password:data.manager_password});
+    closeModal();await renderDiscounts();toast(percentLabel(rate.percent_bp)+' discount '+(active?'enabled.':'disabled.'));
+  },active?'Enable rate':'Disable rate');
 }
 
 function printerSettingsPanel(data){

@@ -20,7 +20,7 @@ def main():
     with sqlite3.connect(args.backup.resolve().as_uri()+'?mode=ro', uri=True) as source:
         if source.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or source.execute('PRAGMA foreign_key_check').fetchone():
             parser.error('Backup integrity verification failed.')
-        if source.execute('PRAGMA user_version').fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+        if source.execute('PRAGMA user_version').fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
             parser.error('This backup needs a different application version.')
     with args.backup.open('rb') as stream:
         checksum=hashlib.file_digest(stream,'sha256').hexdigest()

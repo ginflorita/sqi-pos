@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS discount_rates (
  discount_rate_id INTEGER PRIMARY KEY,
  percent_bp INTEGER NOT NULL UNIQUE CHECK(percent_bp BETWEEN 1 AND 9900),
- created_by_user_id INTEGER REFERENCES users(user_id), created_at TEXT NOT NULL
+ created_by_user_id INTEGER REFERENCES users(user_id), created_at TEXT NOT NULL,
+ active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)), disabled_at TEXT
 );
 CREATE TABLE IF NOT EXISTS bazaars (
  bazaar_id INTEGER PRIMARY KEY, name TEXT NOT NULL, starts_on TEXT NOT NULL, ends_on TEXT,
@@ -239,4 +240,4 @@ CREATE TABLE IF NOT EXISTS receipt_print_jobs (
  created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT, error_message TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_automatic_print_per_sale ON receipt_print_jobs(sale_id) WHERE job_kind='automatic';
-PRAGMA user_version=11;
+PRAGMA user_version=12;

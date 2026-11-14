@@ -10,6 +10,10 @@ if ($address -notmatch '^[a-zA-Z0-9.-]+$' -or $address -eq 'localhost' -or $addr
 }
 $url = "https://${address}:8765/"
 $root = Split-Path $PSScriptRoot -Parent
+$icon = Join-Path $root 'static\sqi-pos.ico'
+if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) {
+    throw 'The SQI shortcut icon is missing from the static folder.'
+}
 . (Join-Path $PSScriptRoot 'Pos-App-Window.ps1')
 $browser = Get-PosAppBrowser
 if (-not $ShortcutDirectory -or -not (Test-Path -LiteralPath $ShortcutDirectory -PathType Container)) {
@@ -22,6 +26,7 @@ $open.TargetPath = $browser
 $open.Arguments = "--app=$url --new-window"
 $open.WorkingDirectory = Split-Path $browser -Parent
 $open.Description = 'Open SQI POS in a dedicated app window on the second laptop'
+$open.IconLocation = "$icon,0"
 $open.Save()
 Write-Output "Created $shortcut"
 Write-Output "Double-click it to open $url without browser tabs or an address bar."

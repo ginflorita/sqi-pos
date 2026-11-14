@@ -1084,8 +1084,10 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @app.get('/api/discount')
     @signed_in()
     def discount_get():
+        manager = g.user['role'] in ('manager', 'it_admin')
         return jsonify(rates=[dict(row) for row in db().execute(
-            'SELECT discount_rate_id,percent_bp,created_at FROM discount_rates ORDER BY percent_bp')])
+            'SELECT discount_rate_id,percent_bp,active,created_at,disabled_at FROM discount_rates' +
+            ('' if manager else ' WHERE active=1') + ' ORDER BY active DESC,percent_bp')])
 
     @app.post('/api/discount')
     @signed_in(True)
@@ -1102,22 +1104,29 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                   after={'discount_percent_bp': percent}, approved=g.user['user_id'])
         return jsonify(discount_rate_id=rate_id,discount_percent_bp=percent)
 
-    @app.delete('/api/discount/<int:rate_id>')
+    @app.put('/api/discount/<int:rate_id>')
     @signed_in(True)
-    def discount_delete(rate_id):
+    def discount_set_active(rate_id):
         data = payload()
         reauth(data)
+        active = data.get('active')
+        require(type(active) is bool, 'Choose whether the discount rate is active.')
         with transaction(db()):
-            rate = db().execute('SELECT percent_bp FROM discount_rates WHERE discount_rate_id=?', (rate_id,)).fetchone()
+            rate = db().execute('SELECT percent_bp,active FROM discount_rates WHERE discount_rate_id=?', (rate_id,)).fetchone()
             require(rate, 'Discount rate not found.', 404)
+            require(bool(rate['active']) != active, 'This discount rate is already ' + ('active.' if active else 'disabled.'), 409)
             percent = rate['percent_bp']
-            affected = db().execute("UPDATE purchase_tickets SET discount_percent_bp=0,discount_selected=0,version=version+1,updated_at=? WHERE state='open' AND discount_percent_bp=?",
-                                    (now(),percent)).rowcount
-            db().execute('DELETE FROM discount_rates WHERE discount_rate_id=?', (rate_id,))
-            event('discount.rate_deleted', 'discount_rates', rate_id,
-                  before={'discount_percent_bp': percent}, after={'open_tickets_cleared': affected},
+            affected = 0
+            if not active:
+                affected = db().execute("UPDATE purchase_tickets SET discount_percent_bp=0,discount_selected=0,version=version+1,updated_at=? WHERE state='open' AND discount_percent_bp=?",
+                                        (now(),percent)).rowcount
+            db().execute('UPDATE discount_rates SET active=?,disabled_at=? WHERE discount_rate_id=?',
+                         (int(active),None if active else now(),rate_id))
+            event('discount.rate_enabled' if active else 'discount.rate_disabled', 'discount_rates', rate_id,
+                  before={'discount_percent_bp': percent, 'active': bool(rate['active'])},
+                  after={'active': active, 'open_tickets_cleared': affected},
                   approved=g.user['user_id'])
-        return jsonify(deleted=True,open_tickets_cleared=affected)
+        return jsonify(active=active,open_tickets_cleared=affected)
 
     def quote(tid):
         t = get_ticket(tid)
@@ -1126,7 +1135,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
             JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
             LEFT JOIN product_images i ON i.product_id=p.product_id AND i.superseded_at IS NULL WHERE l.purchase_ticket_id=? ORDER BY l.product_id''', (tid,)).fetchall()
-        rates = [dict(row) for row in db().execute('SELECT discount_rate_id,percent_bp FROM discount_rates ORDER BY percent_bp')]
+        rates = [dict(row) for row in db().execute('SELECT discount_rate_id,percent_bp FROM discount_rates WHERE active=1 ORDER BY percent_bp')]
         percent = t['discount_percent_bp'] if t['state'] != 'open' or any(r['percent_bp'] == t['discount_percent_bp'] for r in rates) else 0
         discounts = allocate_discount(lines, percent)
         snapshots = [{**{k:r[k] for k in ('product_id','quantity','sku','description','short_description','unit','active','category_id','category_name','price_id','amount_minor','product_image_id','quantity_on_hand')},
@@ -1185,7 +1194,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             shift()
             ticket = get_ticket(tid)
             require(ticket['state'] == 'open' and ticket['version'] == version, 'The ticket changed. Reload it before choosing a discount.', 409)
-            require(not percent or db().execute('SELECT 1 FROM discount_rates WHERE percent_bp=?', (percent,)).fetchone(),
+            require(not percent or db().execute('SELECT 1 FROM discount_rates WHERE percent_bp=? AND active=1', (percent,)).fetchone(),
                     'This discount rate is no longer available. Refresh the order.', 409)
             if ticket['discount_percent_bp'] != percent:
                 db().execute('UPDATE purchase_tickets SET discount_percent_bp=?,discount_selected=?,version=version+1,updated_at=? WHERE purchase_ticket_id=?',
@@ -1501,15 +1510,18 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         total=sum(r['line_total_minor'] for r in sales_rows)
         refund=sum(r['refund_minor'] for r in refunds)
         groups={k:{} for k in ('items','categories','cashiers','days')}
-        def accumulate(group,key,label,amount=0,returned=0,units=0,returned_units=0):
+        def accumulate(group,key,label,amount=0,returned=0,units=0,returned_units=0,business_date=None):
             row=groups[group].setdefault(str(key),{'key':key,'label':label,'sales_minor':0,'refunds_minor':0,'units':0,'returned_units':0})
             row['sales_minor']+=amount;row['refunds_minor']+=returned;row['units']+=units;row['returned_units']+=returned_units
+            if business_date:
+                daily=row.setdefault('daily',{}).setdefault(business_date,{'sales_minor':0,'refunds_minor':0})
+                daily['sales_minor']+=amount;daily['refunds_minor']+=returned
         for r in sales_rows:
             for group,key,label in [('items',r['product_id'],r['description_snapshot']+' · '+r['sku_snapshot']),('categories',r['category_name_snapshot'],r['category_name_snapshot']),('cashiers',r['cashier_user_id'],r['display_name']),('days',r['business_date'],f'Day {r["day_number"]} · {r["business_date"]}')]:
-                accumulate(group,key,label,amount=r['line_total_minor'],units=r['quantity'])
+                accumulate(group,key,label,amount=r['line_total_minor'],units=r['quantity'],business_date=r['business_date'])
         for r in refunds:
             for group,key,label in [('items',r['product_id'],r['description_snapshot']+' · '+r['sku_snapshot']),('categories',r['category_name_snapshot'],r['category_name_snapshot']),('cashiers',r['created_by_user_id'],r['display_name']),('days',r['business_date'],f'Day {r["day_number"]} · {r["business_date"]}')]:
-                accumulate(group,key,label,returned=r['refund_minor'],returned_units=r['quantity'])
+                accumulate(group,key,label,returned=r['refund_minor'],returned_units=r['quantity'],business_date=r['business_date'])
         for group in groups:
             groups[group]=sorted(groups[group].values(),key=lambda r:r['sales_minor']-r['refunds_minor'],reverse=True)
         result={'summary':{'transactions':len({r['sale_id'] for r in sales_rows}),'units':sum(r['quantity'] for r in sales_rows),'returned_units':sum(r['quantity'] for r in refunds),'gross_minor':gross,'discount_minor':sum(r['discount_minor'] for r in sales_rows),'tax_minor':sum(r['tax_minor'] for r in sales_rows),'sales_minor':total,'refunds_minor':refund,'net_minor':total-refund},**groups}
@@ -1524,8 +1536,10 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         if end_arg:
             day_clauses.append('business_date<=?');day_params.append(end_arg)
         business_days=db().execute('SELECT day_number,business_date FROM bazaar_days'+(' WHERE '+' AND '.join(day_clauses) if day_clauses else '')+' ORDER BY business_date',day_params).fetchall()
-        bazaar=selected or db().execute('SELECT bazaar_id,currency_code,timezone FROM bazaars ORDER BY bazaar_id DESC LIMIT 1').fetchone()
+        result['business_days']=[dict(day) for day in business_days]
+        bazaar=selected or db().execute('SELECT bazaar_id,event_name,currency_code,timezone FROM bazaars ORDER BY bazaar_id DESC LIMIT 1').fetchone()
         result['currency_code']=bazaar['currency_code']
+        result['event_name']=bazaar['event_name']
         listed_dates=[r['business_date'] for r in business_days]
         listed_dates.extend(r['business_date'] for r in sales_rows)
         listed_dates.extend(r['business_date'] for r in refunds)
