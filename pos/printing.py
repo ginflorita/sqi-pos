@@ -40,6 +40,10 @@ def receipt_image(db, sale_id, paper_size, copy_type='customer'):
         JOIN users u ON u.user_id=s.cashier_user_id JOIN bazaar_days d USING(bazaar_day_id)
         WHERE sale_id=?''', (sale_id,)).fetchone()
     payment = db.execute("SELECT * FROM payments WHERE sale_id=? AND direction='in'", (sale_id,)).fetchone()
+    adjustment = db.execute('SELECT groups_json FROM sale_adjustments WHERE sale_id=?', (sale_id,)).fetchone()
+    adjusted = adjustment is not None
+    groups = json.loads(adjustment['groups_json']) if adjustment else []
+    group_by_product = {product_id: group['name'] for group in groups for product_id in group['product_ids']}
     lines = db.execute('SELECT * FROM sale_lines WHERE sale_id=? ORDER BY sale_line_id', (sale_id,)).fetchall()
     if isinstance(paper_size, int):
         paper_size = 'roll_58' if paper_size == 58 else 'roll_80'
@@ -91,8 +95,8 @@ def receipt_image(db, sale_id, paper_size, copy_type='customer'):
     description_width = price_right - (80 if is_58 else 100) - description_x
     row_height = 25 if is_58 else 28
     line_height = sum(max(1, len(wrapped(receipt_item_name(line), regular, description_width))) * row_height
-                      + 18 + (22 if line['discount_minor'] else 0) for line in lines)
-    image = Image.new('RGB', (width, max(2400, 650 + line_height)), 'white')
+                      + 18 + (22 if group_by_product.get(line['product_id']) or line['discount_minor'] else 0) for line in lines)
+    image = Image.new('RGB', (width, max(2400, 650 + line_height + len(groups)*25)), 'white')
     draw = ImageDraw.Draw(image)
 
     def centered(text, y, font, fill='black'):
@@ -141,7 +145,11 @@ def receipt_image(db, sale_id, paper_size, copy_type='customer'):
         for description in descriptions:
             draw.text((description_x, y), description, font=regular, fill='black')
             y += row_height
-        if line['discount_minor']:
+        group_name = group_by_product.get(line['product_id'])
+        if group_name:
+            draw.text((description_x, y), group_name, font=small, fill='black')
+            y += 22
+        elif line['discount_minor']:
             draw.text((inset, y), 'Discount', font=small, fill='black')
             right('-' + amount(line['discount_minor']), y, small)
             y += 22
@@ -151,9 +159,13 @@ def receipt_image(db, sale_id, paper_size, copy_type='customer'):
     draw.text((inset, y), 'Total amount', font=regular, fill='black')
     right(amount(sale['subtotal_minor']), y)
     y += 32
+    for group in groups:
+        draw.text((inset, y), group['name'] + ' discount', font=small, fill='black')
+        right('-' + amount(group['discount_minor']), y, small)
+        y += 25
     if sale['discount_minor']:
         rate = f"{sale['discount_percent_bp'] / 100:g}%"
-        draw.text((inset, y), f'Discount ({rate})', font=regular, fill='black')
+        draw.text((inset, y), 'Total group discounts' if groups else 'Price adjustment' if adjusted else f'Discount ({rate})', font=regular, fill='black')
         right('-' + amount(sale['discount_minor']), y)
         y += 38
     draw.text((inset, y + 4), 'TOTAL TO PAY', font=regular, fill='black')

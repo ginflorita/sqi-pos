@@ -119,6 +119,14 @@ CREATE TABLE IF NOT EXISTS ticket_lines (
  product_id INTEGER NOT NULL REFERENCES products(product_id), quantity INTEGER NOT NULL CHECK(quantity>0), UNIQUE(purchase_ticket_id,product_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_ticket_per_cashier ON purchase_tickets(owner_user_id) WHERE state='open';
+CREATE TABLE IF NOT EXISTS ticket_adjustments (
+ purchase_ticket_id INTEGER PRIMARY KEY REFERENCES purchase_tickets(purchase_ticket_id),
+ scope TEXT NOT NULL CHECK(scope IN ('order','item','group')),
+ product_ids_json TEXT NOT NULL, target_minor INTEGER NOT NULL CHECK(target_minor>0),
+ discount_minor INTEGER NOT NULL CHECK(discount_minor>0), basis_hash TEXT NOT NULL,
+ reason TEXT NOT NULL, groups_json TEXT NOT NULL DEFAULT '[]', requested_by_user_id INTEGER NOT NULL REFERENCES users(user_id),
+ approved_by_user_id INTEGER NOT NULL REFERENCES users(user_id), approved_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sales (
  sale_id INTEGER PRIMARY KEY, purchase_ticket_id INTEGER NOT NULL UNIQUE REFERENCES purchase_tickets(purchase_ticket_id),
  receipt_number TEXT NOT NULL UNIQUE, bazaar_day_id INTEGER NOT NULL REFERENCES bazaar_days(bazaar_day_id),
@@ -127,6 +135,15 @@ CREATE TABLE IF NOT EXISTS sales (
  discount_minor INTEGER NOT NULL DEFAULT 0 CHECK(discount_minor>=0), tax_minor INTEGER NOT NULL DEFAULT 0 CHECK(tax_minor>=0),
  discount_percent_bp INTEGER NOT NULL DEFAULT 0 CHECK(discount_percent_bp BETWEEN 0 AND 9900),
  total_minor INTEGER NOT NULL CHECK(total_minor=subtotal_minor-discount_minor+tax_minor), completed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sale_adjustments (
+ sale_adjustment_id INTEGER PRIMARY KEY, sale_id INTEGER NOT NULL UNIQUE REFERENCES sales(sale_id),
+ scope TEXT NOT NULL CHECK(scope IN ('order','item','group')),
+ product_ids_json TEXT NOT NULL, target_minor INTEGER NOT NULL CHECK(target_minor>0),
+ discount_minor INTEGER NOT NULL CHECK(discount_minor>0), reason TEXT NOT NULL,
+ groups_json TEXT NOT NULL DEFAULT '[]',
+ requested_by_user_id INTEGER NOT NULL REFERENCES users(user_id),
+ approved_by_user_id INTEGER NOT NULL REFERENCES users(user_id), approved_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS checkout_requests (
  checkout_request_id INTEGER PRIMARY KEY, request_key TEXT NOT NULL UNIQUE,
@@ -217,6 +234,7 @@ CREATE INDEX IF NOT EXISTS sales_day ON sales(bazaar_day_id,cashier_user_id);
 CREATE INDEX IF NOT EXISTS recent_sales ON sales(bazaar_day_id,completed_at);
 CREATE INDEX IF NOT EXISTS movements_product ON stock_movements(product_id,stock_movement_id);
 CREATE INDEX IF NOT EXISTS audit_time ON audit_events(audit_event_id DESC);
+CREATE INDEX IF NOT EXISTS discount_log_lookup ON audit_events(bazaar_id,action,audit_event_id DESC);
 CREATE TABLE IF NOT EXISTS receipt_printers (
  receipt_printer_id INTEGER PRIMARY KEY,
  terminal_id INTEGER NOT NULL UNIQUE REFERENCES terminals(terminal_id),
@@ -240,4 +258,4 @@ CREATE TABLE IF NOT EXISTS receipt_print_jobs (
  created_at TEXT NOT NULL, claimed_at TEXT, finished_at TEXT, error_message TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_automatic_print_per_sale ON receipt_print_jobs(sale_id) WHERE job_kind='automatic';
-PRAGMA user_version=12;
+PRAGMA user_version=14;

@@ -19,7 +19,7 @@ Each person uses a named account; there is no shared cashier or guest account. O
 | Approve voids, returns, stock adjustments, and cash exceptions | No | Yes |
 | Open and close bazaar days; manage backups and settings | No | Yes |
 
-The server checks authorization on every request and checks it again inside financial write transactions after acquiring the write lock. Passwords use salted scrypt hashes; sign-in and manager approval attempts are throttled. Sessions expire after 30 minutes without application activity or 12 hours in total. Background connection checks do not extend idle sessions. Sensitive changes require the manager's password. A valid account can sign in from any browser without device approval. LAN mode requires HTTPS; Windows permissions must protect host data and backups from cashier accounts.
+The server checks authorization on every request and checks it again inside financial write transactions after acquiring the write lock. Passwords use salted scrypt hashes; sign-in and manager approval attempts are throttled. Sessions expire after 30 minutes without application activity or 12 hours in total. Background connection checks do not extend idle sessions. Stock, cash movement, corrections, account changes, and business day controls require the manager's password; cashier discount decisions are logged under the signed-in account. A valid account can sign in from any browser without device approval. LAN mode requires HTTPS; Windows permissions must protect host data and backups from cashier accounts.
 
 ## Bazaar days and cashier shifts
 
@@ -38,7 +38,7 @@ Each cashier opens a shift with an opening cash count. Closing records expected 
 
 ## Checkout and duplicate prevention
 
-1. A cashier creates one purchase ticket for the customer's purchase and searches or scans items. Product selection opens a quantity dialog with the price, amount to add, available stock, and any existing order quantity. The cashier confirms **Add to order** before the cart changes. Cancel/Escape adds nothing. Product double-clicks do not bypass confirmation; barcode entry follows the same flow.
+1. A cashier creates one purchase ticket for the customer's purchase and searches or scans items. Enter after an exact barcode or SKU opens **Choose quantity**; a scanned or manually entered code adds nothing until the cashier confirms. **Find item** submits a code when the scanner has no Enter suffix. Pressing `*` with an empty search field presets the quantity shown in the next exact-code scan's review. Canceling the review leaves the preset ready; confirming the add consumes it. Name searches show matching products; Enter reviews a sole match, while ↑/↓ and Enter choose among several. Selecting a product with **+** opens the same review. **Qty** in the order sets that line's total.
 2. The app calculates totals on the server. The cashier enters the payment amount and reviews the change.
 3. **Confirm payment** opens a final Yes / No dialog showing total, cash paid, and change. No, closing, or Escape returns to the same payment form without submitting. Only Yes stores the pending request and sends the ticket ID, a unique request key, and a hash of the confirmed cart/payment. Retries use the existing request. The browser may disable the button, but server and database rules provide the actual protection.
 4. The server acquires the database write transaction before its final recheck. Within that transaction it confirms the ticket is open and owned by the cashier, validates item status and prices, checks payment and available stock, creates one sale and receipt number, records sale lines and payment, records stock movements, marks the ticket completed, and writes the successful-sale audit event.
@@ -47,6 +47,8 @@ Each cashier opens a shift with an opening cash count. Closing records expected 
 `sales.purchase_ticket_id`, `sales.receipt_number`, and `checkout_requests.request_key` are unique. A double-click or retry of a committed request returns the original result. If the network drops after commit but before the browser sees the response, the cashier checks the ticket status and receives the existing receipt; the app never assumes it should submit a new sale. A request key reused with different contents is rejected. Rejected attempts are audited separately from the rolled-back sale transaction.
 
 One ticket has one owner and laptop at a time, and each cashier can have one open ticket. Transfers are audited and require a receiving same-day shift with no existing order. Software cannot identify the same physical purchase if two people independently create different tickets. Use one ticket per customer purchase. Identical baskets sold within two minutes require the cashier to confirm they are separate purchases; questionable matches need manager review.
+
+The signed-in cashier may apply fixed peso discount groups to their own open ticket without manager approval. Each group needs a reason, cannot share items with another group, and must leave at least one cent per unit. The separate manager-facing Discount log reads immutable audit snapshots of every application, change, removal, invalidation, and completed discounted sale. Snapshots include the actor, ticket, terminal, group reasons, item quantities and prices, original total, reduction, and final total.
 
 ## Receipts, corrections, and cash
 

@@ -28,7 +28,7 @@ def initialize(path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as db:
         schema_version = db.execute('PRAGMA user_version').fetchone()[0]
-        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
+        if schema_version not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
             raise RuntimeError('Unsupported database version. Restore the matching application.')
         db.execute('PRAGMA journal_mode=WAL')
         if schema_version and 'copy_type' not in {row['name'] for row in db.execute('PRAGMA table_info(receipt_print_jobs)')}:
@@ -115,6 +115,10 @@ def initialize(path):
                 db.execute('ALTER TABLE discount_rates ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1))')
             if 'disabled_at' not in columns:
                 db.execute('ALTER TABLE discount_rates ADD COLUMN disabled_at TEXT')
+        for table in ('ticket_adjustments','sale_adjustments'):
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
+                if 'groups_json' not in {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN groups_json TEXT NOT NULL DEFAULT '[]'")
         db.executescript(Path(__file__).with_name('schema.sql').read_text(encoding='utf-8'))
         db.execute('INSERT OR IGNORE INTO system_settings(system_setting_id,instance_key,created_at) VALUES(1,?,?)',
                    (secrets.token_hex(24),now()))
@@ -123,7 +127,7 @@ def initialize(path):
             if old_rate:
                 db.execute('INSERT OR IGNORE INTO discount_rates(percent_bp,created_at) VALUES(?,?)', (old_rate,now()))
                 db.execute("UPDATE purchase_tickets SET discount_percent_bp=? WHERE state='open' AND discount_selected=1", (old_rate,))
-        immutable = ('sales', 'sale_lines', 'payments', 'stock_movements', 'product_prices',
+        immutable = ('sales', 'sale_lines', 'sale_adjustments', 'payments', 'stock_movements', 'product_prices',
                      'sale_corrections', 'correction_lines', 'audit_events', 'receipt_events',
                      'stock_documents', 'stock_document_lines', 'checkout_requests')
         for table in immutable:

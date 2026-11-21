@@ -58,8 +58,16 @@ def allocate_discount(lines, percent_bp):
     """Allocate an order discount in cents while leaving every unit refundable."""
     gross = [line['quantity'] * line['amount_minor'] for line in lines]
     capacity = [amount - line['quantity'] for amount, line in zip(gross, lines)]
+    total_discount = min((sum(gross) * percent_bp + 5000) // 10000, sum(capacity))
+    return allocate_discount_amount(lines,total_discount)
+
+
+def allocate_discount_amount(lines,total_discount):
+    """Distribute an exact discount across lines, retaining at least one cent per unit."""
+    gross = [line['quantity'] * line['amount_minor'] for line in lines]
+    capacity = [amount - line['quantity'] for amount, line in zip(gross, lines)]
     total_capacity = sum(capacity)
-    total_discount = min((sum(gross) * percent_bp + 5000) // 10000, total_capacity)
+    require(0<=total_discount<=total_capacity,'The adjustment is larger than the selected items allow.')
     if not total_discount:
         return [0] * len(lines)
     portions = [total_discount * available for available in capacity]
@@ -69,6 +77,52 @@ def allocate_discount(lines, percent_bp):
     for index in order[:remaining]:
         discounts[index] += 1
     return discounts
+
+
+def ticket_price_basis(lines):
+    return digest(json.dumps([(line['product_id'],line['quantity'],line['price_id'],line['amount_minor'])
+                              for line in lines]))
+
+
+def price_group_label(index):
+    label=''
+    while True:
+        index,remainder=divmod(index,26)
+        label=chr(65+remainder)+label
+        if index==0:
+            return 'Group '+label
+        index-=1
+
+
+def discount_snapshot(quote):
+    """Freeze the prices and item allocation shown when a discount action occurs."""
+    adjustment=quote.get('manual_adjustment') or {}
+    groups=adjustment.get('groups') or []
+    group_by_product={pid:group['name'] for group in groups for pid in group['product_ids']}
+    return {
+        'purchase_ticket_id':quote['purchase_ticket_id'],
+        'ticket_number':quote['ticket_number'],
+        'cashier_user_id':quote['owner_user_id'],
+        'subtotal_minor':quote['subtotal_minor'],
+        'discount_minor':quote['discount_minor'],
+        'total_minor':quote['total_minor'],
+        'discount_percent_bp':quote['discount_percent_bp'],
+        'adjustment_stale':quote.get('manual_adjustment_stale',False),
+        'reason':adjustment.get('reason'),
+        'scope':adjustment.get('scope'),
+        'groups':[{'name':group['name'],'reason':group['reason'],
+                   'gross_minor':group['gross_minor'],'discount_minor':group['discount_minor'],
+                   'final_minor':group['final_minor'],'product_ids':group['product_ids']}
+                  for group in groups],
+        'items':[{'product_id':line['product_id'],'sku':line['sku'],
+                  'description':line['description'],'quantity':line['quantity'],
+                  'unit_price_minor':line['amount_minor'],
+                  'gross_minor':line['quantity']*line['amount_minor'],
+                  'discount_minor':line['discount_minor'],
+                  'final_minor':line['line_total_minor'],
+                  'group':group_by_product.get(line['product_id'])}
+                 for line in quote['lines']]
+    }
 
 
 def refund_for_quantity(line, already_returned, quantity):
@@ -461,6 +515,22 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         drafts = db().execute('SELECT * FROM product_import_drafts ORDER BY description').fetchall() if g.user['role'] in ('manager', 'it_admin') else []
         return jsonify(products=[dict(r) for r in products], drafts=[dict(r) for r in drafts],
                        categories=[dict(r) for r in db().execute('SELECT * FROM categories ORDER BY name')])
+
+    @app.get('/api/products/price-check')
+    @signed_in()
+    def product_price_check():
+        code=request.args.get('code','').strip()
+        require(code and len(code)<=80,'Scan or enter a barcode or SKU of at most 80 characters.')
+        rows=db().execute('''SELECT p.product_id,p.sku,p.barcode,p.description,p.unit,
+            pr.amount_minor AS selling_price_minor
+            FROM products p
+            JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
+            WHERE p.active=1 AND (p.barcode=? OR lower(p.sku)=lower(?)) LIMIT 2''',(code,code)).fetchall()
+        require(rows,'No active product matches that barcode or SKU.',404)
+        require(len(rows)==1,'More than one product matches that code. Check its barcode and SKU.',409)
+        response=jsonify(product=dict(rows[0]))
+        response.headers['Cache-Control']='no-store'
+        return response
 
     @app.post('/api/categories')
     @signed_in(True)
@@ -868,8 +938,11 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 require(data.get('cancel_open_order') is True and data.get('purchase_ticket_id')==order['purchase_ticket_id']
                         and data.get('ticket_version')==order['version'],
                         'Review the current unpaid order and explicitly confirm its cancellation before closing.',409)
+                current=quote(order['purchase_ticket_id'],enforce_owner=False)
                 db().execute("UPDATE purchase_tickets SET state='cancelled',version=version+1,updated_at=? WHERE purchase_ticket_id=?",(now(),order['purchase_ticket_id']))
-                event('ticket.cancelled_by_manager','purchase_tickets',order['purchase_ticket_id'],day=s['bazaar_day_id'],reason=reason,approved=g.user['user_id'])
+                event('ticket.cancelled_by_manager','purchase_tickets',order['purchase_ticket_id'],day=s['bazaar_day_id'],
+                      before=discount_snapshot(current) if current['discount_minor'] or current['manual_adjustment'] else None,
+                      reason=reason,approved=g.user['user_id'])
             else:
                 require(not data.get('purchase_ticket_id'),'The order changed. Refresh this shift before closing.',409)
             expected=cash_expected(sid)
@@ -1117,7 +1190,11 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             require(bool(rate['active']) != active, 'This discount rate is already ' + ('active.' if active else 'disabled.'), 409)
             percent = rate['percent_bp']
             affected = 0
+            cleared_tickets=[]
             if not active:
+                cleared_tickets=[(row['purchase_ticket_id'],row['bazaar_day_id'],
+                    discount_snapshot(quote(row['purchase_ticket_id'],enforce_owner=False)))
+                    for row in db().execute("SELECT purchase_ticket_id,bazaar_day_id FROM purchase_tickets WHERE state='open' AND discount_percent_bp=?",(percent,))]
                 affected = db().execute("UPDATE purchase_tickets SET discount_percent_bp=0,discount_selected=0,version=version+1,updated_at=? WHERE state='open' AND discount_percent_bp=?",
                                         (now(),percent)).rowcount
             db().execute('UPDATE discount_rates SET active=?,disabled_at=? WHERE discount_rate_id=?',
@@ -1126,18 +1203,51 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                   before={'discount_percent_bp': percent, 'active': bool(rate['active'])},
                   after={'active': active, 'open_tickets_cleared': affected},
                   approved=g.user['user_id'])
+            for ticket_id,day_id,before in cleared_tickets:
+                event('ticket.discount_cleared_by_rate','purchase_tickets',ticket_id,day=day_id,
+                      before=before,after=discount_snapshot(quote(ticket_id,enforce_owner=False)),
+                      reason='Discount rate disabled',approved=g.user['user_id'])
         return jsonify(active=active,open_tickets_cleared=affected)
 
-    def quote(tid):
-        t = get_ticket(tid)
+    def quote(tid,enforce_owner=True):
+        t = get_ticket(tid,enforce_owner)
         lines = db().execute('''SELECT l.product_id,l.quantity,p.sku,p.description,p.short_description,p.unit,p.active,p.category_id,c.name category_name,
             b.quantity_on_hand,pr.price_id,pr.amount_minor,i.product_image_id FROM ticket_lines l JOIN products p USING(product_id)
             JOIN categories c USING(category_id) JOIN stock_balances b USING(product_id)
             JOIN product_prices pr ON pr.price_id=(SELECT MAX(price_id) FROM product_prices WHERE product_id=p.product_id)
             LEFT JOIN product_images i ON i.product_id=p.product_id AND i.superseded_at IS NULL WHERE l.purchase_ticket_id=? ORDER BY l.product_id''', (tid,)).fetchall()
         rates = [dict(row) for row in db().execute('SELECT discount_rate_id,percent_bp FROM discount_rates WHERE active=1 ORDER BY percent_bp')]
-        percent = t['discount_percent_bp'] if t['state'] != 'open' or any(r['percent_bp'] == t['discount_percent_bp'] for r in rates) else 0
-        discounts = allocate_discount(lines, percent)
+        manual_row=db().execute('SELECT * FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,)).fetchone()
+        manual=None
+        manual_stale=False
+        if manual_row:
+            manual={**dict(manual_row),'product_ids':json.loads(manual_row['product_ids_json']),
+                    'groups':json.loads(manual_row['groups_json'])}
+            manual_stale=manual_row['basis_hash']!=ticket_price_basis(lines)
+            by_product={}
+            if manual['groups']:
+                for group in manual['groups']:
+                    selected=[r for r in lines if r['product_id'] in group['product_ids']]
+                    if len(selected)!=len(group['product_ids']) or any(r['product_id'] in by_product for r in selected):
+                        manual_stale=True
+                        break
+                    for r in selected:
+                        by_product[r['product_id']]=0
+                    if not manual_stale:
+                        portions=allocate_discount_amount(selected,group['discount_minor'])
+                        by_product.update({r['product_id']:portion for r,portion in zip(selected,portions)})
+                manual_stale=manual_stale or sum(by_product.values())!=manual_row['discount_minor']
+            else:
+                selected=[r for r in lines if r['product_id'] in manual['product_ids']]
+                manual_stale=manual_stale or len(selected)!=len(manual['product_ids'])
+                if not manual_stale:
+                    portions=allocate_discount_amount(selected,manual_row['discount_minor'])
+                    by_product={r['product_id']:portion for r,portion in zip(selected,portions)}
+            discounts=[by_product.get(r['product_id'],0) for r in lines] if not manual_stale else [0]*len(lines)
+            percent=0
+        else:
+            percent = t['discount_percent_bp'] if t['state'] != 'open' or any(r['percent_bp'] == t['discount_percent_bp'] for r in rates) else 0
+            discounts = allocate_discount(lines, percent)
         snapshots = [{**{k:r[k] for k in ('product_id','quantity','sku','description','short_description','unit','active','category_id','category_name','price_id','amount_minor','product_image_id','quantity_on_hand')},
                       'discount_minor': discount, 'line_total_minor': r['quantity'] * r['amount_minor'] - discount}
                      for r, discount in zip(lines, discounts)]
@@ -1149,12 +1259,14 @@ def create_app(database=None, backups=None, secure=False, testing=False):
                 previous=[tuple(r) for r in db().execute('SELECT product_id,quantity,unit_price_minor,discount_minor FROM sale_lines WHERE sale_id=? ORDER BY product_id',(candidate['sale_id'],))]
                 if previous==signature:
                     duplicate=dict(candidate);break
-        qhash = digest(json.dumps([tid, t['version'], snapshots, percent, duplicate['sale_id'] if duplicate else None], sort_keys=True))
+        qhash = digest(json.dumps([tid, t['version'], snapshots, percent, manual, manual_stale,
+                                   duplicate['sale_id'] if duplicate else None], sort_keys=True))
         sale = db().execute('SELECT sale_id FROM sales WHERE purchase_ticket_id=?', (tid,)).fetchone()
         subtotal = sum(r['quantity'] * r['amount_minor'] for r in lines)
         discount = sum(discounts)
         return {**dict(t), 'lines': snapshots, 'subtotal_minor': subtotal, 'discount_minor': discount,
                 'discount_percent_bp': percent, 'discount_rates': rates,
+                'manual_adjustment': manual, 'manual_adjustment_stale': manual_stale,
                 'total_minor': subtotal - discount, 'quote_hash': qhash,
                 'sale_id': sale['sale_id'] if sale else None, 'duplicate_warning': duplicate}
 
@@ -1184,6 +1296,118 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     def ticket_get(tid):
         return jsonify(quote(tid))
 
+    @app.put('/api/tickets/<int:tid>/adjustments')
+    @signed_in()
+    def ticket_adjustments_set(tid):
+        data=payload()
+        version=integer(data,'version')
+        expected_hash=text_field(data,'quote_hash',64)
+        requested=data.get('groups')
+        require(isinstance(requested,list) and 1<=len(requested)<=200,'Add at least one price group.')
+        with transaction(db()):
+            shift()
+            ticket=get_ticket(tid)
+            require(ticket['state']=='open' and ticket['version']==version,'The ticket changed. Review the groups again.',409)
+            current=quote(tid)
+            require(current['quote_hash']==expected_hash,'The items or prices changed. Review the groups again.',409)
+            available={line['product_id']:line for line in current['lines']}
+            used=set()
+            normalized=[]
+            for index,group in enumerate(requested):
+                require(isinstance(group,dict),'Enter valid price groups.')
+                ids=group.get('product_ids')
+                require(isinstance(ids,list) and ids and len(ids)<=len(available) and
+                        all(type(pid) is int and pid in available for pid in ids) and
+                        len(set(ids))==len(ids),'Choose items in this order for every group.')
+                require(not used.intersection(ids),'An item can belong to only one price group.')
+                used.update(ids)
+                discount=integer(group,'discount_minor',1)
+                reason=text_field(group,'reason',300)
+                selected=[available[pid] for pid in sorted(ids)]
+                gross=sum(line['quantity']*line['amount_minor'] for line in selected)
+                require(discount<=gross-sum(line['quantity'] for line in selected),
+                        'A group discount must leave at least one cent per unit.')
+                allocate_discount_amount(selected,discount)
+                normalized.append({'name':price_group_label(index),'product_ids':[line['product_id'] for line in selected],
+                                   'gross_minor':gross,'discount_minor':discount,'final_minor':gross-discount,
+                                   'reason':reason})
+            total_discount=sum(group['discount_minor'] for group in normalized)
+            require(total_discount<current['subtotal_minor'],'The price reduction exceeds the order total.')
+            before=discount_snapshot(current) if current['discount_minor'] or current['manual_adjustment'] else None
+            db().execute('DELETE FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,))
+            db().execute('''INSERT INTO ticket_adjustments(purchase_ticket_id,scope,product_ids_json,target_minor,
+                discount_minor,basis_hash,reason,groups_json,requested_by_user_id,approved_by_user_id,approved_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)''',(tid,'group',json.dumps(sorted(used)),
+                    current['subtotal_minor']-total_discount,total_discount,ticket_price_basis(current['lines']),
+                    'Cashier group discounts',json.dumps(normalized),g.user['user_id'],g.user['user_id'],now()))
+            db().execute('''UPDATE purchase_tickets SET discount_percent_bp=0,discount_selected=0,
+                version=version+1,updated_at=? WHERE purchase_ticket_id=?''',(now(),tid))
+            result=quote(tid)
+            event('ticket.groups_adjusted','purchase_tickets',tid,day=ticket['bazaar_day_id'],
+                  before=before,after=discount_snapshot(result))
+        return jsonify(result)
+
+    @app.put('/api/tickets/<int:tid>/adjustment')
+    @signed_in()
+    def ticket_adjustment_set(tid):
+        data=payload()
+        version=integer(data,'version')
+        expected_hash=text_field(data,'quote_hash',64)
+        scope=data.get('scope')
+        require(scope in ('order','item','group'),'Choose the adjustment scope.')
+        ids=data.get('product_ids')
+        require(isinstance(ids,list) and len(ids)<=200 and all(type(pid) is int and pid>0 for pid in ids)
+                and len(set(ids))==len(ids),'Choose valid items for this adjustment.')
+        require((scope=='order' and not ids) or (scope=='item' and len(ids)==1) or
+                (scope=='group' and len(ids)>=2),'Choose the items for this adjustment.')
+        target=integer(data,'target_minor',1)
+        reason=text_field(data,'reason',300)
+        with transaction(db()):
+            shift()
+            ticket=get_ticket(tid)
+            require(ticket['state']=='open' and ticket['version']==version,'The ticket changed. Review the adjustment again.',409)
+            current=quote(tid)
+            require(current['quote_hash']==expected_hash,'The items or prices changed. Review the adjustment again.',409)
+            selected=current['lines'] if scope=='order' else [line for line in current['lines'] if line['product_id'] in ids]
+            require(selected and (scope=='order' or len(selected)==len(ids)),'Choose items in this order.',400)
+            gross=sum(line['quantity']*line['amount_minor'] for line in selected)
+            minimum=sum(line['quantity'] for line in selected)
+            require(minimum<=target<gross,'The final selected price must be below its original total and at least one cent per unit.')
+            discount=gross-target
+            allocate_discount_amount(selected,discount)
+            chosen=[line['product_id'] for line in selected]
+            basis=ticket_price_basis(current['lines'])
+            before=discount_snapshot(current) if current['discount_minor'] or current['manual_adjustment'] else None
+            db().execute('DELETE FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,))
+            db().execute('''INSERT INTO ticket_adjustments(purchase_ticket_id,scope,product_ids_json,target_minor,
+                discount_minor,basis_hash,reason,requested_by_user_id,approved_by_user_id,approved_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',(tid,scope,json.dumps(chosen),target,discount,basis,reason,
+                                               g.user['user_id'],g.user['user_id'],now()))
+            db().execute('''UPDATE purchase_tickets SET discount_percent_bp=0,discount_selected=0,
+                version=version+1,updated_at=? WHERE purchase_ticket_id=?''',(now(),tid))
+            result=quote(tid)
+            event('ticket.price_adjusted','purchase_tickets',tid,day=ticket['bazaar_day_id'],
+                  before=before,after=discount_snapshot(result),reason=reason)
+        return jsonify(result)
+
+    @app.delete('/api/tickets/<int:tid>/adjustment')
+    @signed_in()
+    def ticket_adjustment_remove(tid):
+        version=integer(payload(),'version')
+        with transaction(db()):
+            shift()
+            ticket=get_ticket(tid)
+            require(ticket['state']=='open' and ticket['version']==version,'The ticket changed. Refresh it before removing the adjustment.',409)
+            old=db().execute('SELECT scope,discount_minor FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,)).fetchone()
+            require(old,'There is no price adjustment to remove.',409)
+            before=discount_snapshot(quote(tid))
+            db().execute('DELETE FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,))
+            db().execute('UPDATE purchase_tickets SET version=version+1,updated_at=? WHERE purchase_ticket_id=?',(now(),tid))
+            result=quote(tid)
+            event('ticket.price_adjustment_removed','purchase_tickets',tid,day=ticket['bazaar_day_id'],
+                  before=before,after=discount_snapshot(result))
+        return jsonify(result)
+
     @app.put('/api/tickets/<int:tid>/discount')
     @signed_in()
     def ticket_discount(tid):
@@ -1194,14 +1418,18 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             shift()
             ticket = get_ticket(tid)
             require(ticket['state'] == 'open' and ticket['version'] == version, 'The ticket changed. Reload it before choosing a discount.', 409)
+            require(not percent or not db().execute('SELECT 1 FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,)).fetchone(),
+                    'Remove the custom price adjustment before choosing a preset discount.',409)
             require(not percent or db().execute('SELECT 1 FROM discount_rates WHERE percent_bp=? AND active=1', (percent,)).fetchone(),
                     'This discount rate is no longer available. Refresh the order.', 409)
             if ticket['discount_percent_bp'] != percent:
+                before=discount_snapshot(quote(tid))
                 db().execute('UPDATE purchase_tickets SET discount_percent_bp=?,discount_selected=?,version=version+1,updated_at=? WHERE purchase_ticket_id=?',
                              (percent,int(percent > 0),now(),tid))
-                event('ticket.discount_selected', 'purchase_tickets', tid, day=ticket['bazaar_day_id'],
-                      before={'discount_percent_bp': ticket['discount_percent_bp']}, after={'discount_percent_bp': percent})
             result = quote(tid)
+            if ticket['discount_percent_bp'] != percent:
+                event('ticket.discount_selected', 'purchase_tickets', tid, day=ticket['bazaar_day_id'],
+                      before=before,after=discount_snapshot(result))
         return jsonify(result)
 
     @app.put('/api/tickets/<int:tid>')
@@ -1219,10 +1447,20 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             require(ticket['state'] == 'open' and ticket['version'] == version, 'The ticket changed. Reload it before editing.', 409)
             for pid, quantity in normalized:
                 require(db().execute('SELECT 1 FROM products WHERE product_id=? AND active=1', (pid,)).fetchone(), 'An item is inactive or missing.', 409)
+            cleared=db().execute('SELECT scope,discount_minor,groups_json FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,)).fetchone()
+            before=discount_snapshot(quote(tid)) if cleared else None
+            if cleared and cleared['groups_json']=='[]':
+                db().execute('DELETE FROM ticket_adjustments WHERE purchase_ticket_id=?',(tid,))
+            elif cleared:
+                db().execute("UPDATE ticket_adjustments SET basis_hash='invalidated' WHERE purchase_ticket_id=?",(tid,))
             db().execute('DELETE FROM ticket_lines WHERE purchase_ticket_id=?', (tid,))
             db().executemany('INSERT INTO ticket_lines(purchase_ticket_id,product_id,quantity) VALUES(?,?,?)', [(tid,*l) for l in normalized])
             db().execute('UPDATE purchase_tickets SET version=version+1,updated_at=? WHERE purchase_ticket_id=?', (now(), tid))
             event('ticket.updated', 'purchase_tickets', tid, day=ticket['bazaar_day_id'], after={'lines': normalized})
+            if cleared:
+                event('ticket.price_adjustment_invalidated' if cleared['groups_json']!='[]' else 'ticket.price_adjustment_cleared',
+                      'purchase_tickets',tid,day=ticket['bazaar_day_id'],before=before,
+                      after=discount_snapshot(quote(tid)),reason='Items or quantities changed')
             result = quote(tid)
         return jsonify(result)
 
@@ -1235,8 +1473,10 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             ticket = get_ticket(tid)
             require(ticket['state'] == 'open', 'Only an open ticket can be cancelled.', 409)
             require(ticket['version'] == integer(data, 'version'), 'The ticket changed. Reload it first.', 409)
+            current=quote(tid)
             db().execute("UPDATE purchase_tickets SET state='cancelled',version=version+1,updated_at=? WHERE purchase_ticket_id=?", (now(),tid))
-            event('ticket.cancelled', 'purchase_tickets', tid, day=ticket['bazaar_day_id'], reason=reason)
+            event('ticket.cancelled', 'purchase_tickets', tid, day=ticket['bazaar_day_id'], reason=reason,
+                  before=discount_snapshot(current) if current['discount_minor'] or current['manual_adjustment'] else None)
         return jsonify(ok=True)
 
     @app.post('/api/tickets/<int:tid>/transfer')
@@ -1276,6 +1516,7 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             require(ticket['state'] == 'open' and ticket['bazaar_day_id'] == s['bazaar_day_id'], 'This ticket cannot be checked out.', 409)
             q = quote(tid)
             require(q['version'] == version and secrets.compare_digest(q['quote_hash'],qhash), 'The cart or price changed. Review the new total before taking payment.', 409)
+            require(not q['manual_adjustment_stale'],'A product price or quantity changed. Remove and approve the price adjustment again.',409)
             require(not q['duplicate_warning'] or data.get('duplicate_reviewed') is True,'A matching sale was just saved. Confirm this is a separate customer purchase.',409)
             require(q['lines'], 'Add an item before checkout.')
             require(tendered >= q['total_minor'], 'The amount paid is less than the total.')
@@ -1286,6 +1527,11 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             number = f'SQI-{ticket["bazaar_day_id"]:03d}-{tid:06d}'
             sid = db().execute('''INSERT INTO sales(purchase_ticket_id,receipt_number,bazaar_day_id,shift_id,cashier_user_id,terminal_id,subtotal_minor,discount_minor,discount_percent_bp,total_minor,completed_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)''', (tid,number,s['bazaar_day_id'],s['shift_id'],g.user['user_id'],g.terminal['terminal_id'],q['subtotal_minor'],q['discount_minor'],q['discount_percent_bp'],q['total_minor'],stamp)).lastrowid
+            if manual:=q['manual_adjustment']:
+                db().execute('''INSERT INTO sale_adjustments(sale_id,scope,product_ids_json,target_minor,discount_minor,
+                    reason,groups_json,requested_by_user_id,approved_by_user_id,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                    (sid,manual['scope'],manual['product_ids_json'],manual['target_minor'],manual['discount_minor'],
+                     manual['reason'],manual['groups_json'],manual['requested_by_user_id'],manual['approved_by_user_id'],manual['approved_at']))
             for l in q['lines']:
                 lid = db().execute('''INSERT INTO sale_lines(sale_id,product_id,price_id,product_image_id,sku_snapshot,description_snapshot,short_description_snapshot,category_id_snapshot,category_name_snapshot,
                     unit_snapshot,quantity,unit_price_minor,discount_minor,line_total_minor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
@@ -1296,7 +1542,11 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             db().execute("UPDATE purchase_tickets SET state='completed',version=version+1,updated_at=? WHERE purchase_ticket_id=?", (stamp,tid))
             db().execute("INSERT INTO checkout_requests(request_key,purchase_ticket_id,request_hash,status,sale_id,created_at,finished_at) VALUES(?,?,?,'completed',?,?,?)", (key,tid,fingerprint,sid,stamp,stamp))
             db().execute("INSERT INTO receipt_events(sale_id,event_type,output_format,performed_by_user_id,terminal_id,created_at) VALUES(?,'issued','screen',?,?,?)", (sid,g.user['user_id'],g.terminal['terminal_id'],stamp))
-            event('sale.completed', 'sales', sid, day=s['bazaar_day_id'], after={'subtotal_minor': q['subtotal_minor'], 'discount_minor': q['discount_minor'], 'total_minor':q['total_minor'],'receipt_number':number})
+            sale_record=discount_snapshot(q) if q['discount_minor'] else {
+                'subtotal_minor':q['subtotal_minor'],'discount_minor':0,'total_minor':q['total_minor']}
+            sale_record.update({'receipt_number':number,'tendered_minor':tendered,
+                                'change_minor':tendered-q['total_minor']})
+            event('sale.completed', 'sales', sid, day=s['bazaar_day_id'], after=sale_record)
             printer = db().execute('SELECT * FROM receipt_printers WHERE terminal_id=? AND enabled=1', (g.terminal['terminal_id'],)).fetchone()
             if printer:
                 print_job = db().execute('''INSERT INTO receipt_print_jobs(sale_id,terminal_id,job_kind,printer_name,paper_width_mm,paper_size,requested_by_user_id,created_at)
@@ -1322,7 +1572,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         lines = db().execute('''SELECT l.*,COALESCE((SELECT SUM(c.quantity) FROM correction_lines c WHERE c.sale_line_id=l.sale_line_id),0) returned_quantity
             FROM sale_lines l WHERE l.sale_id=?''', (sid,)).fetchall()
         corrections = db().execute('SELECT * FROM sale_corrections WHERE original_sale_id=? ORDER BY sale_correction_id', (sid,)).fetchall()
-        return jsonify(sale=dict(sale), lines=[dict(r) for r in lines], payment=dict(db().execute('SELECT * FROM payments WHERE sale_id=?', (sid,)).fetchone()), corrections=[dict(r) for r in corrections])
+        adjustment=db().execute('SELECT * FROM sale_adjustments WHERE sale_id=?',(sid,)).fetchone()
+        adjustment={**dict(adjustment),'groups':json.loads(adjustment['groups_json'])} if adjustment else None
+        return jsonify(sale=dict(sale), lines=[dict(r) for r in lines],
+                       adjustment=adjustment,
+                       payment=dict(db().execute('SELECT * FROM payments WHERE sale_id=?', (sid,)).fetchone()),
+                       corrections=[dict(r) for r in corrections])
 
     @app.post('/api/sales/<int:sid>/reprint')
     @signed_in()
@@ -1510,15 +1765,17 @@ def create_app(database=None, backups=None, secure=False, testing=False):
         total=sum(r['line_total_minor'] for r in sales_rows)
         refund=sum(r['refund_minor'] for r in refunds)
         groups={k:{} for k in ('items','categories','cashiers','days')}
-        def accumulate(group,key,label,amount=0,returned=0,units=0,returned_units=0,business_date=None):
-            row=groups[group].setdefault(str(key),{'key':key,'label':label,'sales_minor':0,'refunds_minor':0,'units':0,'returned_units':0})
+        def accumulate(group,key,label,amount=0,returned=0,units=0,returned_units=0,business_date=None,gross=0,discount=0):
+            row=groups[group].setdefault(str(key),{'key':key,'label':label,'gross_minor':0,'discount_minor':0,'sales_minor':0,'refunds_minor':0,'units':0,'returned_units':0})
+            row['gross_minor']+=gross;row['discount_minor']+=discount
             row['sales_minor']+=amount;row['refunds_minor']+=returned;row['units']+=units;row['returned_units']+=returned_units
             if business_date:
                 daily=row.setdefault('daily',{}).setdefault(business_date,{'sales_minor':0,'refunds_minor':0})
                 daily['sales_minor']+=amount;daily['refunds_minor']+=returned
         for r in sales_rows:
             for group,key,label in [('items',r['product_id'],r['description_snapshot']+' · '+r['sku_snapshot']),('categories',r['category_name_snapshot'],r['category_name_snapshot']),('cashiers',r['cashier_user_id'],r['display_name']),('days',r['business_date'],f'Day {r["day_number"]} · {r["business_date"]}')]:
-                accumulate(group,key,label,amount=r['line_total_minor'],units=r['quantity'],business_date=r['business_date'])
+                accumulate(group,key,label,amount=r['line_total_minor'],units=r['quantity'],business_date=r['business_date'],
+                           gross=r['quantity']*r['unit_price_minor'],discount=r['discount_minor'])
         for r in refunds:
             for group,key,label in [('items',r['product_id'],r['description_snapshot']+' · '+r['sku_snapshot']),('categories',r['category_name_snapshot'],r['category_name_snapshot']),('cashiers',r['created_by_user_id'],r['display_name']),('days',r['business_date'],f'Day {r["day_number"]} · {r["business_date"]}')]:
                 accumulate(group,key,label,returned=r['refund_minor'],returned_units=r['quantity'],business_date=r['business_date'])
@@ -1563,12 +1820,12 @@ def create_app(database=None, backups=None, secure=False, testing=False):
             return send_file(report_file,mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',as_attachment=True,download_name=filename+'.xlsx')
         if request.args.get('format')=='csv':
             out=io.StringIO(newline='');writer=csv.writer(out)
-            writer.writerow(['Group','Description','Units sold','Units returned','Sales (minor units)','Refunds (minor units)','Net (minor units)'])
+            writer.writerow(['Group','Description','Units sold','Units returned','Original (minor units)','Discount (minor units)','Sales (minor units)','Refunds (minor units)','Net (minor units)'])
             for group in groups:
                 for r in groups[group]:
                     label=r['label']
                     if label.startswith(('=','+','-','@','\t','\r')): label="'"+label
-                    writer.writerow([group,label,r['units'],r['returned_units'],r['sales_minor'],r['refunds_minor'],r['sales_minor']-r['refunds_minor']])
+                    writer.writerow([group,label,r['units'],r['returned_units'],r['gross_minor'],r['discount_minor'],r['sales_minor'],r['refunds_minor'],r['sales_minor']-r['refunds_minor']])
             response=make_response('\ufeff'+out.getvalue());response.mimetype='text/csv';response.headers['Content-Disposition']=f'attachment; filename="{filename}.csv"'
             return response
         return jsonify(result)
@@ -1577,13 +1834,54 @@ def create_app(database=None, backups=None, secure=False, testing=False):
     @signed_in(True)
     def audit_get():
         current=report_bazaar()
+        page_arg=request.args.get('page','1')
+        require(page_arg.isdecimal() and len(page_arg)<=8 and int(page_arg)>0,'Invalid audit page.')
+        page_size=20
+        bazaar_id=current['bazaar_id'] if current else -1
+        total=db().execute('SELECT COUNT(*) FROM audit_events WHERE bazaar_id=?',(bazaar_id,)).fetchone()[0]
+        page=min(int(page_arg),max(1,(total+page_size-1)//page_size))
         rows=db().execute('''SELECT a.*,u.display_name,t.name terminal_name,subject.display_name subject_display_name FROM audit_events a
             LEFT JOIN users u ON u.user_id=a.actor_user_id LEFT JOIN terminals t USING(terminal_id)
             LEFT JOIN shifts s ON a.entity_type='shifts' AND s.shift_id=CAST(a.entity_key AS INTEGER)
             LEFT JOIN users subject ON subject.user_id=s.cashier_user_id
-            WHERE a.bazaar_id=? ORDER BY audit_event_id DESC LIMIT 500''',
-            (current['bazaar_id'] if current else -1,)).fetchall()
-        return jsonify(events=[dict(r) for r in rows])
+            WHERE a.bazaar_id=? ORDER BY audit_event_id DESC LIMIT ? OFFSET ?''',
+            (bazaar_id,page_size,(page-1)*page_size)).fetchall()
+        return jsonify(events=[dict(r) for r in rows],total=total,page=page,page_size=page_size)
+
+    @app.get('/api/discount-logs')
+    @signed_in(True)
+    def discount_logs_get():
+        current=report_bazaar()
+        page_arg=request.args.get('page','1')
+        require(page_arg.isdecimal() and len(page_arg)<=8 and int(page_arg)>0,'Invalid discount log page.')
+        bazaar_id=current['bazaar_id'] if current else -1
+        actions=(
+            'ticket.groups_adjusted','ticket.price_adjusted','ticket.price_adjustment_removed',
+            'ticket.price_adjustment_invalidated','ticket.price_adjustment_cleared',
+            'ticket.discount_selected','ticket.discount_cleared_by_rate')
+        markers=','.join('?' for _ in actions)
+        condition=f'''a.bazaar_id=? AND (a.action IN ({markers}) OR
+            (a.action='sale.completed' AND EXISTS(SELECT 1 FROM sales completed
+                WHERE completed.sale_id=CAST(a.entity_key AS INTEGER) AND completed.discount_minor>0)) OR
+            (a.action IN ('ticket.cancelled','ticket.cancelled_by_manager') AND a.before_json IS NOT NULL))'''
+        arguments=(bazaar_id,*actions)
+        total=db().execute(f'SELECT COUNT(*) FROM audit_events a WHERE {condition}',arguments).fetchone()[0]
+        page_size=20
+        page=min(int(page_arg),max(1,(total+page_size-1)//page_size))
+        rows=db().execute(f'''SELECT a.*,u.display_name,u.username,t.name terminal_name,
+            d.day_number,d.business_date,COALESCE(pt.ticket_number,st.ticket_number) ticket_number,
+            s.receipt_number,owner.display_name ticket_owner_name FROM audit_events a
+            LEFT JOIN users u ON u.user_id=a.actor_user_id
+            LEFT JOIN terminals t ON t.terminal_id=a.terminal_id
+            LEFT JOIN bazaar_days d ON d.bazaar_day_id=a.bazaar_day_id
+            LEFT JOIN purchase_tickets pt ON a.entity_type='purchase_tickets'
+                AND pt.purchase_ticket_id=CAST(a.entity_key AS INTEGER)
+            LEFT JOIN sales s ON a.entity_type='sales' AND s.sale_id=CAST(a.entity_key AS INTEGER)
+            LEFT JOIN purchase_tickets st ON st.purchase_ticket_id=s.purchase_ticket_id
+            LEFT JOIN users owner ON owner.user_id=COALESCE(pt.owner_user_id,st.owner_user_id)
+            WHERE {condition} ORDER BY a.audit_event_id DESC LIMIT ? OFFSET ?''',
+            (*arguments,page_size,(page-1)*page_size)).fetchall()
+        return jsonify(events=[dict(row) for row in rows],total=total,page=page,page_size=page_size)
 
     def perform_backup(actor=None):
         if not backup_lock.acquire(blocking=False):

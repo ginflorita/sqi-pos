@@ -226,18 +226,18 @@ def export_report(result, sales_rows, refunds, business_days, start, end, curren
     item_rows = []
     for group in result['items']:
         sku, description = item_meta.get(str(group['key']), ('', group['label']))
-        item_rows.append([sku, description, group['units'], group['returned_units'], amount(group['sales_minor']), amount(group['refunds_minor']), amount(group['sales_minor'] - group['refunds_minor'])])
+        item_rows.append([sku, description, group['units'], group['returned_units'], amount(group['gross_minor']), amount(group['discount_minor']), amount(group['sales_minor']), amount(group['refunds_minor']), amount(group['sales_minor'] - group['refunds_minor'])])
     detail_sheet(wb, 'Items', start, end, currency, scope,
-                 ['SKU', 'Item', 'Units sold', 'Units returned', f'Sales ({currency})', f'Refunds ({currency})', f'Net ({currency})'],
-                 item_rows, [20, 46, 14, 18, 20, 20, 20], (5, 6, 7), (3, 4),
-                 ['TOTAL', '', s['units'], s['returned_units'], amount(s['sales_minor']), amount(s['refunds_minor']), amount(s['net_minor'])],
+                 ['SKU', 'Item', 'Units sold', 'Units returned', f'Original ({currency})', f'Discounts ({currency})', f'Sales ({currency})', f'Refunds ({currency})', f'Net ({currency})'],
+                 item_rows, [20, 46, 14, 18, 20, 20, 20, 20, 20], (5, 6, 7, 8, 9), (3, 4),
+                 ['TOTAL', '', s['units'], s['returned_units'], amount(s['gross_minor']), amount(s['discount_minor']), amount(s['sales_minor']), amount(s['refunds_minor']), amount(s['net_minor'])],
                  'Items use the SKU and description recorded on the first matching sale or return in this report.')
 
-    category_rows = [[g['label'], g['units'], g['returned_units'], amount(g['sales_minor']), amount(g['refunds_minor']), amount(g['sales_minor'] - g['refunds_minor'])] for g in result['categories']]
+    category_rows = [[g['label'], g['units'], g['returned_units'], amount(g['gross_minor']), amount(g['discount_minor']), amount(g['sales_minor']), amount(g['refunds_minor']), amount(g['sales_minor'] - g['refunds_minor'])] for g in result['categories']]
     detail_sheet(wb, 'Category', start, end, currency, scope,
-                 ['Category', 'Units sold', 'Units returned', f'Sales ({currency})', f'Refunds ({currency})', f'Net ({currency})'],
-                 category_rows, [40, 16, 19, 20, 20, 20], (4, 5, 6), (2, 3),
-                 ['TOTAL', s['units'], s['returned_units'], amount(s['sales_minor']), amount(s['refunds_minor']), amount(s['net_minor'])],
+                 ['Category', 'Units sold', 'Units returned', f'Original ({currency})', f'Discounts ({currency})', f'Sales ({currency})', f'Refunds ({currency})', f'Net ({currency})'],
+                 category_rows, [40, 16, 19, 20, 20, 20, 20, 20], (4, 5, 6, 7, 8), (2, 3),
+                 ['TOTAL', s['units'], s['returned_units'], amount(s['gross_minor']), amount(s['discount_minor']), amount(s['sales_minor']), amount(s['refunds_minor']), amount(s['net_minor'])],
                  'Categories use the name recorded at the time of each sale or return.')
 
     cashier_receipts = {}
@@ -246,11 +246,11 @@ def export_report(result, sales_rows, refunds, business_days, start, end, curren
         cashier_receipts.setdefault(str(r['cashier_user_id']), set()).add(r['sale_id'])
     for r in refunds:
         cashier_corrections.setdefault(str(r['created_by_user_id']), set()).add(r['sale_correction_id'])
-    cashier_rows = [[g['label'], len(cashier_receipts.get(str(g['key']), ())), len(cashier_corrections.get(str(g['key']), ())), g['units'], g['returned_units'], amount(g['sales_minor']), amount(g['refunds_minor']), amount(g['sales_minor'] - g['refunds_minor'])] for g in result['cashiers']]
+    cashier_rows = [[g['label'], len(cashier_receipts.get(str(g['key']), ())), len(cashier_corrections.get(str(g['key']), ())), g['units'], g['returned_units'], amount(g['gross_minor']), amount(g['discount_minor']), amount(g['sales_minor']), amount(g['refunds_minor']), amount(g['sales_minor'] - g['refunds_minor'])] for g in result['cashiers']]
     detail_sheet(wb, 'Cashier', start, end, currency, scope,
-                 ['Cashier', 'Receipts', 'Returns / voids', 'Units sold', 'Units returned', f'Sales ({currency})', f'Refunds ({currency})', f'Net ({currency})'],
-                 cashier_rows, [35, 12, 17, 14, 18, 20, 20, 20], (6, 7, 8), (2, 3, 4, 5),
-                 ['TOTAL', s['transactions'], len({r['sale_correction_id'] for r in refunds}), s['units'], s['returned_units'], amount(s['sales_minor']), amount(s['refunds_minor']), amount(s['net_minor'])],
+                 ['Cashier', 'Receipts', 'Returns / voids', 'Units sold', 'Units returned', f'Original ({currency})', f'Discounts ({currency})', f'Sales ({currency})', f'Refunds ({currency})', f'Net ({currency})'],
+                 cashier_rows, [35, 12, 17, 14, 18, 20, 20, 20, 20, 20], (6, 7, 8, 9, 10), (2, 3, 4, 5),
+                 ['TOTAL', s['transactions'], len({r['sale_correction_id'] for r in refunds}), s['units'], s['returned_units'], amount(s['gross_minor']), amount(s['discount_minor']), amount(s['sales_minor']), amount(s['refunds_minor']), amount(s['net_minor'])],
                  'Refunds are attributed to the cashier who processed the return or void.')
 
     output = BytesIO()

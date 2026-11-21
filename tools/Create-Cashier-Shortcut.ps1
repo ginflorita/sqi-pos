@@ -1,6 +1,12 @@
 param([string]$Address, [string]$ShortcutDirectory = [Environment]::GetFolderPath('Desktop'))
 
 $ErrorActionPreference = 'Stop'
+$scriptPath = $MyInvocation.MyCommand.Path
+if (-not $scriptPath) {
+    throw 'Run Create-Cashier-Shortcut.cmd from the extracted SQI POS folder.'
+}
+$scriptDirectory = [System.IO.Path]::GetDirectoryName($scriptPath)
+$root = [System.IO.Path]::GetDirectoryName($scriptDirectory)
 if (-not $Address) {
     $Address = Read-Host 'Enter the main laptop IP address or hostname (for example 192.168.1.115)'
 }
@@ -9,12 +15,11 @@ if ($address -notmatch '^[a-zA-Z0-9.-]+$' -or $address -eq 'localhost' -or $addr
     throw 'Enter the main laptop network address, without https:// or a port number.'
 }
 $url = "https://${address}:8765/"
-$root = Split-Path $PSScriptRoot -Parent
 $icon = Join-Path $root 'static\sqi-pos.ico'
 if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) {
-    throw 'The SQI shortcut icon is missing from the static folder.'
+    throw "The SQI shortcut icon is missing at $icon. Copy static\sqi-pos.ico from the main POS folder, or extract the complete cashier shortcut setup kit."
 }
-. (Join-Path $PSScriptRoot 'Pos-App-Window.ps1')
+. (Join-Path $scriptDirectory 'Pos-App-Window.ps1')
 $browser = Get-PosAppBrowser
 if (-not $ShortcutDirectory -or -not (Test-Path -LiteralPath $ShortcutDirectory -PathType Container)) {
     throw 'The shortcut folder was not found.'

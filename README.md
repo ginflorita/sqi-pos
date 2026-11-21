@@ -10,7 +10,7 @@ A local-network POS with products, inventory, cash sales, acknowledgement receip
 | --- | --- |
 | Products | Unique SKU, optional barcode, description, category, unit, locked company unit price, adjustable selling price history, product images, and Excel bulk upload |
 | Inventory | Opening stock, stock receipts, sales-linked deductions, returns, and movement history |
-| Checkout | Optional fullscreen with no sidebar, name/SKU/barcode search, a dedicated scanner or manual barcode field with quantity confirmation before adding, saved tickets, cashier selection from manager-set discount rates, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
+| Checkout | Optional fullscreen with no sidebar, name/SKU/barcode search, one Enter-based scan flow with optional quantity before the next scan, saved tickets, multiple cashier-applied fixed peso discount groups with detailed logs, cash paid, calculated change, and SQI-branded acknowledgement receipts with company contact details and office hours |
 | Duplicate protection | One sale per ticket, replay of repeated payment requests, and warnings for matching recent baskets |
 | Accounts | Named managers/cashiers, account-only sign-in, password confirmation for sensitive changes, and expiring sessions |
 | Events, days, shifts | IT System Administrator starts and archives events; managers open and close days; cashiers open and close shifts. The next event keeps products but starts with zero stock. |
@@ -64,7 +64,7 @@ For the second laptop, complete the [two-PC HTTPS setup](docs/two-pc-setup.md), 
 
 You create the production manager credentials during setup. Setup must be completed on the main PC.
 
-Signed-in managers can add or edit products and photos without entering their password again. Each product has a company unit price that is locked after creation and a selling price that checkout charges. Existing products start with both prices equal to the former current price. A reason is required when changing an existing selling price. Product changes record the manager, time, and changed details in the audit trail. Financial, stock, and account approvals retain password confirmation.
+Signed-in managers can add or edit products and photos without entering their password again. Each product has a company unit price that is locked after creation and a selling price that checkout charges. Existing products start with both prices equal to the former current price. A reason is required when changing an existing selling price. Product changes record the manager, time, and changed details in the audit trail. Stock, cash movement, correction, and account approvals retain password confirmation.
 
 For a large product list, open **Products → Add from Excel** and choose an `.xlsx` workbook containing `ITEM CODE` and `DESCRIPTION` headers. Only those two columns are read. Select **Show uploaded products** to preview every valid row without saving it. Review the list, then select **Save all, set up later** above the list; repeated and existing SKUs are skipped. Imported rows remain under **Products saved for later** with image, category, price, and quantity blank. Use **Set up** whenever you are ready to add selling details and an opening quantity; the item stays out of checkout until then.
 
@@ -106,13 +106,17 @@ After an uncertain payment response, refresh the same browser to check the exist
 
 ### Sales report export
 
-In **Reports**, choose the date range and any day, cashier, category, or item filters, then click **Download Excel report**. The file is named `SQI-POS-Event-###-(YYYY-MM-DD-to-YYYY-MM-DD).xlsx`. Its **Summary** sheet shows overall sales and daily net sales. **Days** shows receipts, units, gross sales, discounts, tax, refunds, and net sales by business day. **Items**, **Category**, and **Cashier** each have their own breakdown and totals. Refunds appear on the day they were processed and under the cashier who processed them. Sales exclude cash in/out and drawer variance; use **Cashier shifts** for cash reconciliation.
+In **Reports**, choose the date range and any day, cashier, category, or item filters, then click **Download Excel report**. The file is named `SQI-POS-Event-###-(YYYY-MM-DD-to-YYYY-MM-DD).xlsx`. Its **Summary** sheet shows overall sales and daily net sales. **Days**, **Items**, **Category**, and **Cashier** compare original selling price totals, discounts, sales after discounts, refunds, and net. Refunds appear on the day they were processed and under the cashier who processed them. Sales exclude cash in/out and drawer variance; use **Cashier shifts** for cash reconciliation.
 
 ### Barcode scanners and manual search
 
-Save each product's unique barcode under **Products**. In **Checkout**, use **Search by name, SKU, or barcode** to browse matching products, or click **Scan or type barcode** and scan a label or type its code, then press **Enter** or **Find item**. A scanner that acts as a keyboard and sends Enter after the code uses the same field. Matching opens **Choose quantity**; nothing is added until the cashier confirms. If the scanner has no Enter suffix, press **Find item** after scanning. Each cashier laptop uses its own scanner; the second laptop still connects to the single POS server on the main laptop.
+Save each product's unique barcode under **Products**. In **Checkout**, scan into the search field with a keyboard-style scanner configured to send Enter after the code. An exact active barcode or SKU opens **Choose quantity**; review the item and quantity, then confirm to add it. Manually typed codes use Enter, and **Find item** submits codes from scanners without an Enter suffix. Name searches show matching products only while searching. Enter reviews a sole match; for several matches, use ↑/↓ to highlight one and Enter to open its quantity review. A product's **+** button opens the same review. Nothing is added until confirmed.
 
-The checkout product area shows 24 matching products at a time with **Previous** and **Next** controls. Search and category filters cover the full catalog, including products on other pages. The order stays beside the catalog on wide screens and moves above it on narrow screens.
+To preset several units for the next code scan, press `*` while the search field is empty or click **Qty before scan**, enter a whole quantity, and confirm. **Next scan** shows the armed quantity, which fills the **Choose quantity** dialog after an exact barcode or SKU match. Confirming the add clears the preset; canceling the dialog, an unmatched code, or a failed save leaves it ready. The **Cancel** button beside **Next scan**, leaving Checkout, or opening payment clears it. Name searches leave a pending scan quantity ready. Each cashier laptop uses its own scanner; the second laptop still connects to the single POS server on the main laptop.
+
+Press **F1** or use **Check price** in the Checkout header to scan an exact barcode or SKU without changing the current order. The modal shows the current selling price and stays open for repeated checks. A scanner with an Enter suffix looks up the price automatically; otherwise press **Find price**. Close or Escape returns focus to the checkout scan field. An armed **Next scan** quantity stays armed while checking prices.
+
+The checkout product area is hidden until a search or category filter is active. It shows 24 matching products at a time with **Previous** and **Next** controls. Search and category filters cover the full catalog, including products on other pages. The order stays beside the catalog on wide screens and moves above it on narrow screens.
 
 ## Backups and restore
 
@@ -149,7 +153,7 @@ Open **http://localhost:8766**. Demo credentials are `demo` / `Bazaar-demo-2026!
 
 ## Current scope
 
-Version 0.1 supports cash payments, whole quantities, one active bazaar, one open ticket per cashier, separate cash drawers, SKU/description imports from Excel, and multiple manager-set percentage discounts for an entire order. In **Settings → Checkout discounts**, the manager adds, disables, or enables rates from 0.01–99% with password confirmation. At checkout, the cashier selects **No discount** or one of the active rates. Disabling a rate clears it from open orders and requires another payment review; the rate record and completed receipts remain intact. Reports show discounts, and refunds use the discounted amount actually paid. Added tax remains zero. Fractional quantities, non-cash payments, statutory discount/tax handling, and additional bazaar creation remain planned.
+Version 0.1 supports cash payments, whole quantities, one active bazaar, one open ticket per cashier, separate cash drawers, and SKU/description imports from Excel. The payment dialog's **Apply group discount** action lets the signed-in cashier create multiple item groups, each with its own fixed peso discount and required reason. Each item can belong to one group. A manager password is not needed. **Discount log** shows the cashier, time, ticket, terminal, reasons, item prices, original total, discount, and final total for each application, change, removal, and completed sale. Current order has no discount controls; saved percentage discounts remain on existing records and can be cleared from the payment dialog for open tickets. Reports retain original totals, discounts, and paid totals; refunds use the discounted amount actually paid. Added tax remains zero. Fractional quantities, non-cash payments, statutory discount/tax handling, and additional bazaar creation remain planned.
 
 Before real trading, confirm the bazaar's currency, tax treatment, receipt content, and printer layout, and test both physical PCs, the router, external backups, restore, and power interruption. The host is a single point of availability. Application audit rules do not prevent a host administrator from changing local files.
 
@@ -158,7 +162,7 @@ Before real trading, confirm the bazaar's currency, tax treatment, receipt conte
 - [Two-PC setup](docs/two-pc-setup.md)
 - [Installation, daily operation, backup, and restore](docs/operations.md)
 - [POS plan and business rules](docs/pos-plan.md)
-- [Database schema: 28 tables with descriptive primary keys](docs/database-schema.md)
+- [Database schema: 34 tables with descriptive primary keys](docs/database-schema.md)
 - [Executable SQL schema](pos/schema.sql)
 - [Verification and remaining equipment checks](docs/verification.md)
 

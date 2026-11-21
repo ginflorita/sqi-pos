@@ -7,6 +7,7 @@ import shutil
 import uuid
 import threading
 import unittest
+from contextlib import closing
 from unittest.mock import patch
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +19,7 @@ from PIL import Image
 
 from pos.app import create_app
 from pos.build import build_id
-from pos.db import connect, initialize
+from pos.db import audit, connect, initialize
 from pos.printing import receipt_image, receipt_item_name
 
 PASSWORD='Counter-test-password-42'
@@ -72,6 +73,27 @@ class POSTest(unittest.TestCase):
         db=connect(self.database)
         try:return db.execute(sql).fetchone()[0]
         finally:db.close()
+
+    def test_audit_pages_include_older_events(self):
+        db=connect(self.database)
+        try:
+            for number in range(45):
+                audit(db,'test.pagination','tests',number,after={'number':number})
+            db.commit()
+        finally:
+            db.close()
+
+        first=self.client.get('/api/audit?page=1').json
+        second=self.client.get('/api/audit?page=2').json
+        last=self.client.get('/api/audit?page=999').json
+        self.assertEqual((first['page'],first['page_size']),(1,20))
+        self.assertEqual(len(first['events']),20)
+        self.assertEqual(len(second['events']),20)
+        self.assertEqual(first['total'],second['total'])
+        self.assertGreater(first['events'][-1]['audit_event_id'],second['events'][0]['audit_event_id'])
+        self.assertEqual(last['page'],(first['total']+19)//20)
+        self.assertEqual(len(last['events']),first['total']-20*(last['page']-1))
+        self.assertEqual(self.client.get('/api/audit?page=0').status_code,400)
 
     def upload_products(self,rows,headers=('ITEM CODE','DESCRIPTION','CATEGORY','PRICE','TOTAL (PCS)'),preview=False):
         workbook=Workbook();sheet=workbook.active;sheet.title='Inventory'
@@ -355,6 +377,256 @@ class POSTest(unittest.TestCase):
                 connection.execute('UPDATE products SET unit_price_minor=5500 WHERE product_id=?',(pid,))
         finally:connection.close()
 
+    def test_price_check_is_read_only_and_uses_current_selling_price(self):
+        cashier,_,_=self.second_cashier()
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM purchase_tickets'),0)
+        self.assertEqual(cashier.get('/api/products/price-check?code=12345678').status_code,200)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM purchase_tickets'),0)
+        ticket=self.ticket(quantity=2)
+        tid=ticket['purchase_ticket_id']
+        version=ticket['version']
+        audit_count=self.scalar('SELECT COUNT(*) FROM audit_events')
+        checked=cashier.get('/api/products/price-check?code=12345678')
+        self.assertEqual(checked.status_code,200)
+        self.assertEqual(checked.json['product']['selling_price_minor'],12550)
+        self.assertEqual(checked.json['product']['sku'],'TEST-01')
+        self.assertNotIn('unit_price_minor',checked.json['product'])
+        self.assertEqual(checked.headers['Cache-Control'],'no-store')
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM audit_events'),audit_count)
+        self.assertEqual(self.scalar(f'SELECT quantity FROM ticket_lines WHERE purchase_ticket_id={tid}'),2)
+        self.assertEqual(self.scalar(f'SELECT version FROM purchase_tickets WHERE purchase_ticket_id={tid}'),version)
+
+        updated={'sku':'TEST-01','barcode':'12345678','description':'Test product',
+                 'category_id':self.category,'unit':'pc','selling_price_minor':9900,
+                 'reason':'Retail price changed','active':True}
+        self.call('/products/'+str(self.product),updated,'PUT')
+        self.assertEqual(cashier.get('/api/products/price-check?code=test-01').json['product']['selling_price_minor'],9900)
+        self.assertEqual(cashier.get('/api/products/price-check?code=missing').status_code,404)
+        self.assertEqual(cashier.get('/api/products/price-check?code=').status_code,400)
+        self.assertEqual(cashier.get('/api/products/price-check?code='+'x'*81).status_code,400)
+        self.assertEqual(self.app.test_client().get('/api/products/price-check?code=12345678').status_code,401)
+        self.call('/products',{'sku':'INACTIVE','barcode':'87654321','description':'Unavailable item',
+                               'category_id':self.category,'unit':'pc','amount_minor':5000,'active':False})
+        self.assertEqual(cashier.get('/api/products/price-check?code=87654321').status_code,404)
+        self.call('/products',{'sku':'12345678','description':'Conflicting SKU','category_id':self.category,
+                               'unit':'pc','amount_minor':5000,'active':True})
+        self.assertEqual(cashier.get('/api/products/price-check?code=12345678').status_code,409)
+        self.assertEqual(self.scalar(f'SELECT quantity FROM ticket_lines WHERE purchase_ticket_id={tid}'),2)
+        self.assertEqual(self.scalar(f'SELECT version FROM purchase_tickets WHERE purchase_ticket_id={tid}'),version)
+
+    def test_approved_group_adjustment_preserves_gross_discount_and_net(self):
+        other=self.call('/products',{'sku':'GROUP-02','description':'Second group item','category_id':self.category,
+                                     'unit':'pc','amount_minor':5000,'active':True}).json['product_id']
+        self.call('/stock',{'document_type':'opening','request_key':'group-adjustment-stock-01',
+                            'manager_password':PASSWORD,'lines':[{'product_id':other,'quantity':3}]})
+        ticket=self.call('/tickets',{}).json
+        ticket=self.call('/tickets/'+str(ticket['purchase_ticket_id']),{'version':ticket['version'],
+            'lines':[{'product_id':self.product,'quantity':2},{'product_id':other,'quantity':1}]},'PUT').json
+        body={'version':ticket['version'],'quote_hash':ticket['quote_hash'],'scope':'group',
+              'product_ids':[self.product,other],'target_minor':30000,'reason':'Customer negotiated group price'}
+        adjusted=self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustment',body,'PUT').json
+        self.assertEqual((adjusted['subtotal_minor'],adjusted['discount_minor'],adjusted['total_minor']),(30100,100,30000))
+        self.assertEqual(sum(line['discount_minor'] for line in adjusted['lines']),100)
+        self.assertEqual(adjusted['discount_percent_bp'],0)
+        self.assertEqual(self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
+                                   {'version':adjusted['version'],'discount_percent_bp':1000},'PUT',expected=409).status_code,409)
+        sale=self.call('/checkout',self.checkout_body(adjusted,key='group-adjustment-sale-01',tendered=30000)).json
+        receipt=self.client.get('/api/sales/'+str(sale['sale_id'])).json
+        self.assertEqual((receipt['sale']['subtotal_minor'],receipt['sale']['discount_minor'],receipt['sale']['total_minor']),(30100,100,30000))
+        self.assertEqual(receipt['adjustment']['scope'],'group')
+        self.assertEqual(receipt['adjustment']['reason'],'Customer negotiated group price')
+        self.assertEqual(receipt['payment']['tendered_minor'],30000)
+        self.assertEqual(sum(line['line_total_minor'] for line in receipt['lines']),30000)
+        report_data=self.client.get('/api/reports').json
+        report=report_data['summary']
+        self.assertEqual((report['gross_minor'],report['discount_minor'],report['sales_minor']),(30100,100,30000))
+        for group in ('days','categories','cashiers'):
+            self.assertEqual(report_data[group][0]['discount_minor'],100)
+        export=self.client.get('/api/reports?format=xlsx')
+        workbook=load_workbook(io.BytesIO(export.data),read_only=True,data_only=True)
+        try:
+            self.assertEqual(workbook['Items']['F8'].value,0.83)
+            self.assertEqual(workbook['Category']['E8'].value,1)
+            self.assertEqual(workbook['Cashier']['G8'].value,1)
+        finally:workbook.close()
+        returned=next(line for line in receipt['lines'] if line['product_id']==other)
+        correction=self.call('/sales/'+str(sale['sale_id'])+'/corrections',{
+            'request_key':'group-adjustment-refund-01','correction_type':'return',
+            'reason':'Customer return','manager_password':PASSWORD,
+            'lines':[{'sale_line_id':returned['sale_line_id'],'quantity':1,'restock_quantity':1}]}).json
+        self.assertEqual(correction['refund_minor'],returned['line_total_minor'])
+
+    def test_cashier_item_adjustment_rechecks_changed_prices(self):
+        cashier,csrf,_=self.second_cashier()
+        ticket=self.ticket(quantity=2,client=cashier,csrf=csrf)
+        path='/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustment'
+        body={'version':ticket['version'],'quote_hash':ticket['quote_hash'],'scope':'item',
+              'product_ids':[self.product],'target_minor':25000,'reason':'Agreed item price'}
+        adjusted=self.call(path,body,'PUT',cashier,csrf).json
+        self.assertEqual((adjusted['subtotal_minor'],adjusted['discount_minor'],adjusted['total_minor']),(25100,100,25000))
+        self.call('/products/'+str(self.product),{'sku':'TEST-01','barcode':'12345678','description':'Test product',
+            'category_id':self.category,'unit':'pc','selling_price_minor':13000,'reason':'New retail price','active':True},'PUT')
+        stale=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET',client=cashier,csrf=csrf).json
+        self.assertTrue(stale['manual_adjustment_stale'])
+        self.assertEqual(stale['discount_minor'],0)
+        self.call('/checkout',self.checkout_body(stale,key='stale-price-adjustment-01',tendered=26000),
+                  client=cashier,csrf=csrf,expected=409)
+        cleared=self.call(path,{'version':stale['version']},'DELETE',cashier,csrf).json
+        self.assertIsNone(cleared['manual_adjustment'])
+        self.assertEqual(cleared['total_minor'],26000)
+
+    def test_order_adjustment_clears_after_cart_change(self):
+        ticket=self.ticket(quantity=1)
+        path='/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustment'
+        adjusted=self.call(path,{'version':ticket['version'],'quote_hash':ticket['quote_hash'],
+            'scope':'order','product_ids':[],'target_minor':12000,'reason':'Agreed order total'},'PUT').json
+        self.assertEqual(adjusted['discount_minor'],550)
+        changed=self.call('/tickets/'+str(ticket['purchase_ticket_id']),{'version':adjusted['version'],
+            'lines':[{'product_id':self.product,'quantity':2}]},'PUT').json
+        self.assertIsNone(changed['manual_adjustment'])
+        self.assertEqual(changed['total_minor'],25100)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM ticket_adjustments'),0)
+
+    def test_multiple_fixed_discount_groups_save_exact_totals_and_refunds(self):
+        second=self.call('/products',{'sku':'GROUP-SECOND','description':'Group A companion',
+            'category_id':self.category,'unit':'pc','amount_minor':5000,'active':True}).json['product_id']
+        third=self.call('/products',{'sku':'GROUP-THIRD','description':'Group B item',
+            'category_id':self.category,'unit':'pc','amount_minor':50000,'active':True}).json['product_id']
+        self.call('/stock',{'document_type':'opening','request_key':'multi-group-opening-01',
+            'manager_password':PASSWORD,'lines':[{'product_id':second,'quantity':3},{'product_id':third,'quantity':3}]})
+        ticket=self.call('/tickets',{}).json
+        ticket=self.call('/tickets/'+str(ticket['purchase_ticket_id']),{'version':ticket['version'],
+            'lines':[{'product_id':self.product,'quantity':2},{'product_id':second,'quantity':1},
+                     {'product_id':third,'quantity':1}]},'PUT').json
+        path='/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustments'
+        groups=[{'product_ids':[self.product,second],'discount_minor':10000,'reason':'Group A agreed price'},
+                {'product_ids':[third],'discount_minor':45000,'reason':'Group B agreed price'}]
+        body={'version':ticket['version'],'quote_hash':ticket['quote_hash'],'groups':groups,
+              'manager_password':PASSWORD}
+        self.call(path,{**body,'groups':[{**groups[0],'product_ids':[self.product,third]},groups[1]]},'PUT',expected=400)
+        self.call(path,{**body,'groups':[{**groups[0],'discount_minor':30100},groups[1]]},'PUT',expected=400)
+        self.assertEqual(self.scalar('SELECT COUNT(*) FROM ticket_adjustments'),0)
+        adjusted=self.call(path,body,'PUT').json
+        self.assertEqual((adjusted['subtotal_minor'],adjusted['discount_minor'],adjusted['total_minor']),(80100,55000,25100))
+        self.assertEqual([g['name'] for g in adjusted['manual_adjustment']['groups']],['Group A','Group B'])
+        self.assertEqual([g['discount_minor'] for g in adjusted['manual_adjustment']['groups']],[10000,45000])
+        self.assertEqual(sum(l['discount_minor'] for l in adjusted['lines']),55000)
+        self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/discount',
+            {'version':adjusted['version'],'discount_percent_bp':1000},'PUT',expected=409)
+        result=self.call('/checkout',self.checkout_body(adjusted,key='multi-group-checkout-01',tendered=25100)).json
+        receipt=self.client.get('/api/sales/'+str(result['sale_id'])).json
+        self.assertEqual([g['reason'] for g in receipt['adjustment']['groups']],
+                         ['Group A agreed price','Group B agreed price'])
+        self.assertEqual(receipt['adjustment']['approved_by_user_id'],1)
+        self.assertEqual(sum(l['line_total_minor'] for l in receipt['lines']),25100)
+        with closing(connect(self.database)) as connection:
+            with Image.open(io.BytesIO(receipt_image(connection,result['sale_id'],'roll_80'))) as artwork:
+                self.assertGreater(artwork.height,300)
+        report=self.client.get('/api/reports').json['summary']
+        self.assertEqual((report['gross_minor'],report['discount_minor'],report['sales_minor']),(80100,55000,25100))
+        returned=next(l for l in receipt['lines'] if l['product_id']==third)
+        correction=self.call('/sales/'+str(result['sale_id'])+'/corrections',{
+            'request_key':'multi-group-refund-01','correction_type':'return','reason':'Returned group B item',
+            'manager_password':PASSWORD,'lines':[{'sale_line_id':returned['sale_line_id'],
+            'quantity':1,'restock_quantity':1}]}).json
+        self.assertEqual(correction['refund_minor'],5000)
+
+    def test_group_discount_does_not_require_manager_password(self):
+        self.call('/users',{'username':'manager2','display_name':'Second manager','role':'manager',
+            'active':True,'password':PASSWORD,'manager_password':PASSWORD})
+        ticket=self.ticket()
+        body={'version':ticket['version'],'quote_hash':ticket['quote_hash'],
+            'groups':[{'product_ids':[self.product],'discount_minor':100,'reason':'Agreed price'}]}
+        adjusted=self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustments',body,'PUT').json
+        self.assertEqual(adjusted['discount_minor'],100)
+        self.assertEqual(adjusted['manual_adjustment']['approved_by_user_id'],1)
+
+    def test_cashier_discount_log_keeps_item_prices_reasons_and_changes(self):
+        cashier,csrf,cashier_id=self.second_cashier()
+        ticket=self.ticket(quantity=2,client=cashier,csrf=csrf)
+        path='/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustments'
+        group=lambda amount,reason:[{'product_ids':[self.product],
+                                     'discount_minor':amount,'reason':reason}]
+        applied=self.call(path,{'version':ticket['version'],'quote_hash':ticket['quote_hash'],
+            'groups':group(100,'Customer agreed price')},'PUT',cashier,csrf).json
+        self.assertEqual(applied['manual_adjustment']['approved_by_user_id'],cashier_id)
+        self.assertEqual(cashier.get('/api/discount-logs').status_code,403)
+        first=self.client.get('/api/discount-logs').json
+        self.assertEqual(first['total'],1)
+        entry=first['events'][0]
+        self.assertEqual((entry['action'],entry['actor_user_id'],entry['ticket_number']),
+                         ('ticket.groups_adjusted',cashier_id,ticket['ticket_number']))
+        snapshot=json.loads(entry['after_json'])
+        self.assertEqual((snapshot['subtotal_minor'],snapshot['discount_minor'],snapshot['total_minor']),
+                         (25100,100,25000))
+        self.assertEqual(snapshot['groups'][0]['reason'],'Customer agreed price')
+        self.assertEqual((snapshot['items'][0]['sku'],snapshot['items'][0]['quantity'],
+                          snapshot['items'][0]['unit_price_minor'],snapshot['items'][0]['discount_minor']),
+                         ('TEST-01',2,12550,100))
+        changed=self.call(path,{'version':applied['version'],'quote_hash':applied['quote_hash'],
+            'groups':group(200,'Revised customer price')},'PUT',cashier,csrf).json
+        self.assertEqual(changed['total_minor'],24900)
+        updated=self.client.get('/api/discount-logs').json['events'][0]
+        self.assertEqual(json.loads(updated['before_json'])['discount_minor'],100)
+        self.assertEqual(json.loads(updated['after_json'])['discount_minor'],200)
+        removed=self.call('/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustment',
+            {'version':changed['version']},'DELETE',cashier,csrf).json
+        self.assertEqual(removed['discount_minor'],0)
+        removed_event=self.client.get('/api/discount-logs').json['events'][0]
+        self.assertEqual(removed_event['action'],'ticket.price_adjustment_removed')
+        self.assertEqual(json.loads(removed_event['before_json'])['discount_minor'],200)
+        self.assertEqual(json.loads(removed_event['after_json'])['discount_minor'],0)
+        ready=self.call(path,{'version':removed['version'],'quote_hash':removed['quote_hash'],
+            'groups':group(150,'Final agreed price')},'PUT',cashier,csrf).json
+        sale=self.call('/checkout',self.checkout_body(ready,key='cashier-discount-log-sale-01',tendered=25000),
+                       client=cashier,csrf=csrf).json
+        logs=self.client.get('/api/discount-logs').json
+        self.assertEqual(logs['total'],5)
+        completed=logs['events'][0]
+        self.assertEqual((completed['action'],completed['actor_user_id'],completed['receipt_number']),
+                         ('sale.completed',cashier_id,f'SQI-001-{ticket["purchase_ticket_id"]:06d}'))
+        sale_snapshot=json.loads(completed['after_json'])
+        self.assertEqual((sale_snapshot['discount_minor'],sale_snapshot['tendered_minor'],
+                          sale_snapshot['change_minor']),(150,25000,50))
+        self.assertEqual(sale_snapshot['groups'][0]['reason'],'Final agreed price')
+        self.assertEqual(self.client.get('/api/sales/'+str(sale['sale_id'])).json['sale']['total_minor'],24950)
+        self.assertEqual(json.loads(self.client.get('/api/discount-logs').json['events'][-1]['after_json']),snapshot)
+
+    def test_group_plan_stays_visible_but_needs_reapproval_after_cart_edit(self):
+        ticket=self.ticket(quantity=1)
+        path='/tickets/'+str(ticket['purchase_ticket_id'])+'/adjustments'
+        body={'version':ticket['version'],'quote_hash':ticket['quote_hash'],
+            'groups':[{'product_ids':[self.product],'discount_minor':550,'reason':'Negotiated price'}]}
+        approved=self.call(path,body,'PUT').json
+        changed=self.call('/tickets/'+str(ticket['purchase_ticket_id']),{'version':approved['version'],
+            'lines':[{'product_id':self.product,'quantity':2}]},'PUT').json
+        self.assertTrue(changed['manual_adjustment_stale'])
+        self.assertEqual(changed['manual_adjustment']['groups'][0]['discount_minor'],550)
+        self.assertEqual(changed['discount_minor'],0)
+        invalidated=self.client.get('/api/discount-logs').json['events'][0]
+        self.assertEqual(invalidated['action'],'ticket.price_adjustment_invalidated')
+        self.assertEqual(json.loads(invalidated['before_json'])['discount_minor'],550)
+        self.assertTrue(json.loads(invalidated['after_json'])['adjustment_stale'])
+        self.call('/checkout',self.checkout_body(changed,key='stale-group-checkout-01',tendered=25100),expected=409)
+        refreshed=self.call(path,{**body,'version':changed['version'],'quote_hash':changed['quote_hash']},'PUT').json
+        self.assertFalse(refreshed['manual_adjustment_stale'])
+        self.assertEqual(refreshed['total_minor'],24550)
+
+    def test_version_13_database_adds_group_columns_without_dropping_records(self):
+        legacy=self.folder/'version13.sqlite3'
+        schema=Path(__file__).resolve().parent.parent/'pos'/'schema.sql'
+        old=schema.read_text(encoding='utf-8').replace("groups_json TEXT NOT NULL DEFAULT '[]',",'').replace(
+            'PRAGMA user_version=14;','PRAGMA user_version=13;')
+        with closing(connect(legacy)) as connection:
+            connection.executescript(old)
+            connection.execute("INSERT INTO system_settings(system_setting_id,instance_key,created_at) VALUES(1,'legacy-test','2026-01-01')")
+        initialize(legacy)
+        with closing(connect(legacy)) as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],14)
+            for table in ('ticket_adjustments','sale_adjustments'):
+                self.assertIn('groups_json',{row['name'] for row in connection.execute(f'PRAGMA table_info({table})')})
+            self.assertEqual(connection.execute('SELECT instance_key FROM system_settings').fetchone()[0],'legacy-test')
+
     def test_manager_creates_and_edits_catalog_without_reason_or_password(self):
         data={'sku':'TEST-02','description':'New item','category_id':self.category,'unit':'pc','amount_minor':8500,'active':True}
         pid=self.call('/products',data).json['product_id']
@@ -490,7 +762,7 @@ class POSTest(unittest.TestCase):
         legacy_db=self.folder/'legacy.sqlite3'
         legacy_schema=Path(__file__).resolve().parent.parent.joinpath('pos','schema.sql').read_text(encoding='utf-8')
         legacy_schema=legacy_schema.replace("role IN ('it_admin','manager','cashier')",
-            "role IN ('manager','cashier')").replace('PRAGMA user_version=12;','PRAGMA user_version=8;')
+            "role IN ('manager','cashier')").replace('PRAGMA user_version=14;','PRAGMA user_version=8;')
         connection=sqlite3.connect(legacy_db)
         try:
             connection.executescript(legacy_schema)
@@ -501,7 +773,7 @@ class POSTest(unittest.TestCase):
         initialize(legacy_db)
         connection=connect(legacy_db)
         try:
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],12)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],14)
             self.assertEqual([tuple(row) for row in connection.execute('SELECT user_id,role FROM users ORDER BY user_id')],[(1,'it_admin'),(2,'cashier')])
             self.assertEqual(connection.execute('SELECT created_by_user_id FROM users WHERE user_id=2').fetchone()[0],1)
             self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(),[])
@@ -622,6 +894,11 @@ class POSTest(unittest.TestCase):
         self.assertEqual(sale['sale']['discount_percent_bp'],1250)
         self.assertEqual(sale['sale']['total_minor'],32944)
         self.assertEqual(sale['payment']['change_minor'],56)
+        log=self.client.get('/api/discount-logs').json
+        self.assertEqual([entry['action'] for entry in log['events']],
+                         ['sale.completed','ticket.discount_selected'])
+        self.assertEqual(json.loads(log['events'][0]['after_json'])['discount_minor'],4706)
+        self.assertEqual(json.loads(log['events'][1]['after_json'])['discount_percent_bp'],1250)
         self.call('/discount/'+str(rate_id),{'active':False,'manager_password':PASSWORD},'PUT')
         self.assertEqual(self.client.get('/api/sales/'+str(sale_id)).json['sale']['discount_percent_bp'],1250)
         self.assertEqual(self.scalar(f'SELECT active FROM discount_rates WHERE discount_rate_id={rate_id}'),0)
@@ -668,6 +945,10 @@ class POSTest(unittest.TestCase):
         self.call('/discount/'+str(first),{'active':False,'manager_password':PASSWORD},'PUT',cashier,csrf,expected=403)
         self.call('/discount/'+str(first),{'active':False},'PUT',expected=403)
         self.call('/discount/'+str(first),{'active':False,'manager_password':PASSWORD},'PUT')
+        cleared_log=self.client.get('/api/discount-logs').json['events'][0]
+        self.assertEqual(cleared_log['action'],'ticket.discount_cleared_by_rate')
+        self.assertEqual(json.loads(cleared_log['before_json'])['discount_minor'],1255)
+        self.assertEqual(json.loads(cleared_log['after_json'])['discount_minor'],0)
         self.assertEqual(self.scalar(f'SELECT COUNT(*) FROM discount_rates WHERE discount_rate_id={first}'),1)
         self.assertEqual(self.scalar(f'SELECT active FROM discount_rates WHERE discount_rate_id={first}'),0)
         self.assertEqual([r['percent_bp'] for r in cashier.get('/api/discount').json['rates']],[2000])
@@ -707,7 +988,7 @@ class POSTest(unittest.TestCase):
             connection.execute('PRAGMA user_version=4')
         finally:connection.close()
         initialize(self.database)
-        self.assertEqual(self.scalar('PRAGMA user_version'),12)
+        self.assertEqual(self.scalar('PRAGMA user_version'),14)
         self.assertEqual([r['percent_bp'] for r in self.client.get('/api/discount').json['rates']],[1500])
         restored=self.call('/tickets/'+str(ticket['purchase_ticket_id']),method='GET').json
         self.assertEqual(restored['discount_percent_bp'],1500)
@@ -722,7 +1003,7 @@ class POSTest(unittest.TestCase):
             connection.execute('PRAGMA user_version=11')
         finally:connection.close()
         initialize(self.database)
-        self.assertEqual(self.scalar('PRAGMA user_version'),12)
+        self.assertEqual(self.scalar('PRAGMA user_version'),14)
         self.assertEqual(self.scalar(f'SELECT active FROM discount_rates WHERE discount_rate_id={rate_id}'),1)
         self.assertEqual(self.scalar(f'SELECT disabled_at IS NULL FROM discount_rates WHERE discount_rate_id={rate_id}'),1)
 
@@ -758,9 +1039,9 @@ class POSTest(unittest.TestCase):
             self.assertEqual(workbook['Days']['J8'].value,125.5)
             self.assertEqual(workbook['Days']['L9'].value,-125.5)
             self.assertEqual(workbook['Days']['L10'].value,0)
-            self.assertEqual(workbook['Items']['G8'].value,0)
-            self.assertEqual(workbook['Category']['F8'].value,0)
-            self.assertEqual(workbook['Cashier']['H8'].value,0)
+            self.assertEqual(workbook['Items']['I8'].value,0)
+            self.assertEqual(workbook['Category']['H8'].value,0)
+            self.assertEqual(workbook['Cashier']['J8'].value,0)
             self.assertEqual(workbook['Days'].freeze_panes,'B8')
         finally:workbook.close()
 

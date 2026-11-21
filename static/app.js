@@ -29,10 +29,13 @@ const minor = value => {
   const [a,b='']=s.split('.'); return Number(a)*100+Number(b.padEnd(2,'0'));
 };
 const key = () => [...crypto.getRandomValues(new Uint8Array(24))].map(n=>n.toString(16).padStart(2,'0')).join('');
-const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:location.hash.slice(1)||'reports',products:[],productDrafts:[],categories:[],ticket:null,cart:[],search:'',category:'all',productPage:0,filters:{},online:true,paying:false,cartError:false,receiptPrinter:null};
+const S={csrf:'',user:null,terminal:null,bazaar:null,day:null,shift:null,page:location.hash.slice(1)||'reports',products:[],productDrafts:[],categories:[],ticket:null,cart:[],search:'',category:'all',productPage:0,productSelectionId:null,filters:{},online:true,paying:false,cartError:false,receiptPrinter:null};
+let auditPage=1;
+let discountLogPage=1,discountLogEventId=null;
 const managerAccess=()=>['manager','it_admin'].includes(S.user?.role);
 const roleLabel=user=>({it_admin:'IT System Administrator',manager:'Manager',cashier:'Cashier'})[user?.role]||'Unknown';
 let cartQueue=Promise.resolve(), currentReceipt=null, pollBusy=false, catalogPollBusy=false, creatingTicket=null, cartPending=0, quantityDialogOpening=false, checkoutFullscreen=false, browserFullscreenOwned=false, paymentConfirmationCancel=null, shiftConfirmationCancel=null, pendingProductImport=null, managementOpen=false, backupPage=0, shiftHistoryPage=1, transactionPage=1, transactionSearch='', catalogSearch='', catalogDraftPage=1, catalogProductPage=1, reportProductPage=1, reportProductScope='', reportEventId=null, auditEventId=null, inventoryEventId=null, archiveEventName='', bootRetryTimer=null;
+let pendingScanQuantity=null;
 const reportGraphSelections={};
 const inventoryFilters={q:'',category_id:'',from:'',to:'',view:'products',product_page:1,movement_page:1};
 let inventoryRenderId=0;
@@ -50,6 +53,7 @@ async function api(path, method='GET', data, isForm=false){
 function toast(message,error=false){const t=$('#toast');t.textContent=message;t.className='show'+(error?' error':'');clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.className='',6000);}
 function updateConnection(){const node=$('#connection-state');if(node)node.innerHTML=`<span class="dot"></span>${S.online?'Local server connected':'Connection lost'}`;const banner=$('#connection-banner');if(banner){banner.hidden=S.online;banner.textContent='Connection lost. Checkout is paused. Reconnect to check your ticket.';}}
 function button(label,action,style='light',i='',extra=''){return `<button type="button" class="btn ${style}" data-action="${action}" ${extra}>${i?icon(i):''}${label}</button>`;}
+function shortcutButtonLabel(key,label){return `<kbd aria-hidden="true">${key}</kbd><span>${label}</span>`;}
 function passwordControl(name,opts=''){return `<div class="password-control"><input id="f-${name}" name="${name}" type="password" ${opts}><button type="button" class="password-toggle" data-action="toggle-password" aria-label="Show password" title="Show password" aria-pressed="false" aria-controls="f-${name}">${icon('eye')}</button></div>`;}
 function field(label,name,type='text',value='',opts=''){return `<div class="field"><label for="f-${name}">${label}</label>${type==='password'?passwordControl(name,opts):`<input id="f-${name}" name="${name}" type="${type}" value="${e(value)}" ${opts}>`}</div>`;}
 function approval(){return `<div class="field full"><label for="f-manager_password">Confirm with your manager password</label>${passwordControl('manager_password','autocomplete="current-password" required minlength="12"')}</div>`;}
@@ -59,7 +63,7 @@ function table(headers,rows){return `<div class="table-scroll"><table><thead><tr
 function pill(text,style='success'){return `<span class="pill ${style}"><span class="dot"></span>${e(text)}</span>`;}
 function heading(title,description,actions=''){return `<div class="page-heading"><div><div class="eyebrow">SQI GROUP INT'L CORP · PHILIPPINES</div><h1>${e(title)}</h1>${description?`<p>${e(description)}</p>`:''}</div><div class="actions">${actions}</div></div>`;}
 function modal(title,body,wide=false){if(paymentConfirmationCancel)paymentConfirmationCancel();if(shiftConfirmationCancel)shiftConfirmationCancel();$('#modal-root').innerHTML=`<div class="modal-overlay"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${e(title)}</h2><button class="icon-btn" aria-label="Close dialog" data-action="close-modal">${icon('close')}</button></div><div class="modal-body">${body}</div></section></div>`;setTimeout(()=>($('input:not([type=hidden]),select', $('.modal-body'))||$('.modal-head button'))?.focus({preventScroll:true}),30);}
-function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}if(shiftConfirmationCancel){shiftConfirmationCancel();return;}const wasQuantity=['Choose quantity','Set quantity'].includes($('#modal-title')?.textContent);$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;if(wasQuantity&&S.page==='checkout'){const search=$('#product-search');search?.focus({preventScroll:true});search?.select();}}
+function closeModal(){if(S.paying)return;if(paymentConfirmationCancel){paymentConfirmationCancel();return;}if(shiftConfirmationCancel){shiftConfirmationCancel();return;}const restoreCheckoutFocus=['Choose quantity','Set quantity','Quantity before scan','Check price'].includes($('#modal-title')?.textContent);$('#modal-root').innerHTML='';currentReceipt=null;pendingProductImport=null;if(restoreCheckoutFocus&&S.page==='checkout'){const search=$('#product-search');search?.focus({preventScroll:true});search?.select();}}
 function confirmLogout(){
   if(!S.user||S.paying||$('.modal'))return;
   modal('Sign out?',`<p>Sign out of ${e(S.user.display_name)}?</p>${S.shift?'<p class="muted signout-note">Your cashier shift and any unpaid order will stay open. Close them first if you are done selling.</p>':''}<div class="modal-actions">${button('Stay signed in','close-modal','light')}${button('Sign out','confirm-logout','green','logout')}</div>`);
@@ -91,12 +95,13 @@ async function refreshCheckoutStock(){
 }
 function renderAuth(setup){
   if(paymentConfirmationCancel)paymentConfirmationCancel();
+  pendingScanQuantity=null;
   void exitCheckoutFullscreen();
   $('#modal-root').innerHTML='';
   $('#app').innerHTML=`<div class="auth auth-login"><header class="auth-login-brand"><img src="/static/sqi-logo.png" alt="SQI logo"><strong>SQI Group Int'l Corp Philippines</strong></header><main class="auth-form"><div class="eyebrow">${setup?'LET’S SET UP YOUR COUNTER':'WELCOME BACK'}</div><h2>${setup?'Set up your SQI counter.':'Your counter is waiting.'}</h2><p>${setup?'Create the manager account on this host laptop. You can add your second cashier after setup.':'Sign in with your own account to open your shift.'}</p><form id="auth-form" class="form-grid">${setup?field('Your name','display_name','text','','required autocomplete="name"')+field('Business name','bazaar_name','text',"SQI Group Int'l Corp - Philippines",'required maxlength="120"'):''}${field('Username','username','text','','required autocomplete="username" minlength="3" maxlength="50"')}${field('Password','password','password','','required autocomplete="'+(setup?'new-password':'current-password')+'" '+(setup?'minlength="12"':''))}${setup?selectField('Currency','currency_code',[['PHP','PHP · Philippine peso'],['USD','USD · US dollar'],['TWD','TWD · Taiwan dollar'],['SGD','SGD · Singapore dollar'],['EUR','EUR · Euro'],['GBP','GBP · British pound'],['MYR','MYR · Malaysian ringgit'],['THB','THB · Thai baht'],['HKD','HKD · Hong Kong dollar'],['AUD','AUD · Australian dollar']],'PHP')+field('Business timezone','timezone','text','Asia/Manila','required'):''}<div class="form-error" role="alert"></div><div class="field full"><button class="btn green" type="submit">${setup?'Create my counter':'Sign in'}${icon('arrow')}</button></div></form>${setup?'<div class="auth-note">Use at least 12 characters for your password. Currency and timezone apply to this counter.</div>':''}</main><footer class="auth-footer">www.sqigroup.ph | 2027</footer></div>`;
   $('#auth-form').addEventListener('submit',async ev=>{ev.preventDefault();const form=ev.currentTarget;const b=$('[type=submit]',form);b.disabled=true;$('.form-error',form).textContent='';try{await api(setup?'/setup':'/login','POST',Object.fromEntries(new FormData(form)));await boot();}catch(error){$('.form-error',form).textContent=error.message;}finally{b.disabled=false;}});
 }
-const nav=[['checkout','cart','Checkout'],['catalog','grid','Products'],['inventory','box','Inventory'],['transactions','receipt','Transactions'],['reports','chart','Reports'],['shifts','clock','Cashier shifts'],['team','users','Team'],['audit','shield','Audit trail'],['management','settings','Business day'],['events','sun','Events'],['discounts','chart','Discounts'],['backups','download','Backups'],['printer','print','Printer']];
+const nav=[['checkout','cart','Checkout'],['catalog','grid','Products'],['inventory','box','Inventory'],['transactions','receipt','Transactions'],['reports','chart','Reports'],['shifts','clock','Cashier shifts'],['team','users','Team'],['audit','shield','Audit trail'],['discount_logs','chart','Discount log'],['management','settings','Business day'],['events','sun','Events'],['discounts','chart','Discounts'],['backups','download','Backups'],['printer','print','Printer']];
 const managementPages=new Set(['management','events','discounts','backups','printer']);
 function shell(){
   const allowed=nav.filter(([id])=>!managementPages.has(id)&&(managerAccess()||['checkout','transactions','shifts'].includes(id)));
@@ -104,6 +109,7 @@ function shell(){
   managementOpen=managementPages.has(S.page);
   const managementNav=managerAccess()?`<div class="nav-management"><button id="management-toggle" type="button" class="${managementOpen?'group-active':''}" data-action="toggle-management" aria-expanded="${managementOpen}" aria-controls="management-subnav" title="Management">${icon('settings')}<span>Management</span>${icon('down')}</button><div class="nav-submenu" id="management-subnav" ${managementOpen?'':'hidden'}>${nav.filter(([id])=>managementPages.has(id)&&(id!=='events'||S.user.role==='it_admin')).map(([id,i,label])=>`<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}</div></div>`:'';
   $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div class="brand company-brand"><img src="/static/sqi-logo.png" alt="SQI company logo" width="5442" height="3064"><span class="company-brand-name">SQI Group Int'l Corp<small>Philippines</small></span></div><div class="nav-label">WORKSPACE</div><nav class="nav">${allowed.map(([id,i,label],index)=>`${index===5?'<div class="nav-gap"></div>':''}<button data-page="${id}" class="${S.page===id?'active':''}" title="${label}">${icon(i)}<span>${label}</span></button>`).join('')}${managementNav}</nav><div class="side-foot"><div class="local-status" id="connection-state"><span class="dot"></span>Local server connected</div><div class="side-user"><div class="avatar">${e(initials)}</div><div><strong>${e(S.user.display_name)}</strong><small>${e(roleLabel(S.user))}</small></div><button class="icon-btn" title="Sign out" aria-label="Sign out" data-action="logout">${icon('logout')}</button></div></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">SQI Group <span>/</span><b id="page-name">Checkout</b></div><div class="top-right"><span class="date-label">${new Intl.DateTimeFormat('en',{timeZone:S.bazaar?.timezone||'Asia/Manila',month:'short',day:'numeric',year:'numeric'}).format(new Date())}</span>${pill(S.bazaar?(S.day?'Day '+S.day.day_number+' is open':'Day closed'):'No event open',S.day?'success':'warn')}<div class="avatar">${e(initials)}</div></div></header><div id="connection-banner" class="connection-banner" hidden></div><div id="page" class="page"></div></main></div>`;
+  $('.top-right').insertAdjacentHTML('afterbegin','<div id="topbar-checkout-actions" class="topbar-checkout-actions"></div>');
 }
 function renderBootError(error){
   clearTimeout(bootRetryTimer);
@@ -127,19 +133,21 @@ function renderBootError(error){
 async function boot(){try{clearTimeout(bootRetryTimer);await cartQueue;const server=await api('/server-info');if(server.restart_needed){const error=new Error('The POS server needs to restart to finish this update.');error.code='update';throw error;}await refreshState();if(!S.user)return renderAuth(S.setup_required);if(!nav.some(([id])=>id===S.page))S.page='reports';if(!managerAccess()&&!['checkout','transactions','shifts'].includes(S.page))S.page='checkout';if(S.page==='events'&&S.user.role!=='it_admin')S.page='reports';await loadCatalog();shell();await navigate(S.page);}catch(error){renderBootError(error);}}
 async function navigate(page){
   if(page==='settings')page='management';
+  if(page!=='checkout')pendingScanQuantity=null;
   if(page==='inventory'&&!S.bazaar&&!inventoryEventId){await navigate(S.user.role==='it_admin'?'events':'management');toast('Start an event to track its inventory.',true);return;}
   if(page==='checkout'&&(!S.day||!S.shift)){
     await navigate(managerAccess()?'reports':'transactions');
     return checkoutStartPrompt();
   }
   if(page!=='checkout')await exitCheckoutFullscreen();
+  if(page!=='checkout')$('#topbar-checkout-actions')?.replaceChildren();
   if(page==='backups'&&S.page!=='backups')backupPage=0;
   S.page=page;if(location.hash.slice(1)!==page)history.replaceState(null,'',`${location.pathname}${location.search}#${page}`);$$('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));$('#page-name').textContent=nav.find(n=>n[0]===page)?.[2]||page;
   if(managementPages.has(page))managementOpen=true;
   const submenu=$('#management-subnav'),toggle=$('#management-toggle');
   if(submenu)submenu.hidden=!managementOpen;
   if(toggle){toggle.setAttribute('aria-expanded',String(managementOpen));toggle.classList.toggle('group-active',managementPages.has(page));}
-  const renderers={checkout:renderCheckout,catalog:renderCatalog,inventory:renderInventory,transactions:renderTransactions,reports:renderReports,shifts:renderShifts,team:renderTeam,audit:renderAudit,management:renderManagement,events:renderEvents,discounts:renderDiscounts,backups:renderBackups,printer:renderPrinter};
+  const renderers={checkout:renderCheckout,catalog:renderCatalog,inventory:renderInventory,transactions:renderTransactions,reports:renderReports,shifts:renderShifts,team:renderTeam,audit:renderAudit,discount_logs:renderDiscountLogs,management:renderManagement,events:renderEvents,discounts:renderDiscounts,backups:renderBackups,printer:renderPrinter};
   try{await renderers[page]();}catch(error){if(error.code==='update'){renderBootError(error);return;}toast(error.message,true);$('#page').innerHTML=empty('Unable to open this page',error.message);}
 }
 function toggleManagement(){
@@ -148,10 +156,26 @@ function toggleManagement(){
   if(submenu)submenu.hidden=!managementOpen;
   if(toggle)toggle.setAttribute('aria-expanded',String(managementOpen));
 }
+function placeCheckoutActions(){
+  const topbar=$('#topbar-checkout-actions'),heading=$('.checkout-heading');
+  if(!topbar||!heading)return;
+  const actions=heading.querySelector(':scope > .actions')||topbar.querySelector(':scope > .actions');
+  if(!actions)return;
+  if(checkoutFullscreen){topbar.replaceChildren();heading.appendChild(actions);}
+  else topbar.replaceChildren(actions);
+}
+function labelCheckoutShortcuts(){
+  const heading=$('.checkout-heading');
+  const close=$('[data-action=close-shift]',heading);
+  if(close){close.classList.add('checkout-key-shortcut');close.innerHTML=shortcutButtonLabel('F2','Close my shift');close.setAttribute('aria-keyshortcuts','F2');close.title='Close my shift (F2)';}
+  const finish=$('[data-action=day-steps]',heading);
+  if(finish&&S.day){finish.classList.add('checkout-key-shortcut');finish.innerHTML=shortcutButtonLabel('Shift+F2','Finish day');finish.setAttribute('aria-keyshortcuts','Shift+F2');finish.title='Finish day steps (Shift+F2)';}
+}
 function syncCheckoutFullscreen(){
   document.body.classList.toggle('checkout-fullscreen',checkoutFullscreen);
+  placeCheckoutActions();
   const control=$('[data-action=toggle-checkout-fullscreen]');
-  if(control){control.innerHTML=icon(checkoutFullscreen?'collapse':'expand')+(checkoutFullscreen?'Exit fullscreen':'Fullscreen');control.setAttribute('aria-pressed',String(checkoutFullscreen));control.title=checkoutFullscreen?`Exit fullscreen and open ${managerAccess()?'Reports':'Transactions'} (Esc)`:'Open checkout fullscreen';}
+  if(control){control.innerHTML=checkoutFullscreen?shortcutButtonLabel('Esc','Exit fullscreen'):icon('expand')+'Fullscreen';control.classList.toggle('checkout-key-shortcut',checkoutFullscreen);control.setAttribute('aria-pressed',String(checkoutFullscreen));if(checkoutFullscreen)control.setAttribute('aria-keyshortcuts','Escape');else control.removeAttribute('aria-keyshortcuts');control.title=checkoutFullscreen?`Exit fullscreen and open ${managerAccess()?'Reports':'Transactions'} (Esc)`:'Open checkout fullscreen';}
 }
 async function enterCheckoutFullscreen(){
   checkoutFullscreen=true;syncCheckoutFullscreen();
@@ -203,7 +227,62 @@ async function openCheckoutFullscreen(){
   await cartQueue;await navigate('checkout');
 }
 document.addEventListener('fullscreenchange',()=>{if(browserFullscreenOwned&&!document.fullscreenElement)void leaveCheckoutFullscreen();});
+function updateScanQuantityIndicator(){
+  const indicator=$('#scan-quantity-status');
+  if(!indicator)return;
+  indicator.hidden=pendingScanQuantity===null;
+  if(pendingScanQuantity!==null)$('#scan-quantity-label').textContent=`Next scan: ${num(pendingScanQuantity)} ${pendingScanQuantity===1?'item':'items'}`;
+}
+function clearScanQuantity(){
+  pendingScanQuantity=null;
+  updateScanQuantityIndicator();
+  $('#product-search')?.focus({preventScroll:true});
+}
+function openScanQuantityModal(){
+  if(S.page!=='checkout'||$('.modal')||S.paying||quantityDialogOpening)return;
+  if(S.cartError){toast('Refresh the counter to recover the saved order before scanning.',true);return;}
+  if(S.ticket&&localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`)){toast('Review the previous payment result before scanning another item.',true);return;}
+  const search=$('#product-search');
+  if(search?.value.trim()){toast('Clear the search field before setting the next scan quantity.',true);search.focus({preventScroll:true});return;}
+  formModal('Quantity before scan',`<div class="quantity-main"><div class="field full"><p class="scan-quantity-explanation">Set a starting quantity for the next barcode or SKU scan. The scan opens a review; nothing is added until you confirm. An unmatched scan keeps this quantity ready.</p></div>${field('Quantity for next scan','quantity','number',pendingScanQuantity??'', 'required min="1" max="1000000" step="1" inputmode="numeric"')}</div>`+quantityKeypad(),async data=>{
+    const value=String(data.quantity).trim(),quantity=Number(value);
+    requireClient(/^\d+$/.test(value)&&Number.isSafeInteger(quantity)&&quantity>=1&&quantity<=1_000_000,'Enter a whole quantity from 1 to 1,000,000.');
+    pendingScanQuantity=quantity;
+    closeModal();
+    updateScanQuantityIndicator();
+  },'Use for next scan',true);
+  const form=$('#modal-form');
+  form.classList.add('quantity-modal-form');
+  wireQuantityKeypad(form,$('[name=quantity]',form));
+}
+function openPriceCheckModal(){
+  if(S.page!=='checkout'||$('.modal')||S.paying)return;
+  if(cartPending){toast('Wait for the current item to save before checking a price.',true);return;}
+  modal('Check price',`<form id="price-check-form" class="price-check-form"><label for="price-check-code">Scan barcode or SKU</label><div class="price-check-entry"><input id="price-check-code" name="code" type="text" maxlength="80" autocomplete="off" autocapitalize="off" spellcheck="false" required placeholder="Scan or type a code"><button type="submit" class="btn green">${icon('search')}Find price</button></div><p class="price-check-note">Scan and press Enter, or use Find price. Checking a price never changes the current order.${pendingScanQuantity!==null?` The next checkout scan is still set to ${num(pendingScanQuantity)} ${pendingScanQuantity===1?'item':'items'}.`:''}</p></form><div id="price-check-result" class="price-check-result" role="status" aria-live="polite"><p>Scan a product to see its current selling price.</p></div><div class="modal-actions">${button('Close','close-modal','light')}</div>`);
+  const dialog=$('#modal-root .modal'),form=$('#price-check-form',dialog),input=$('#price-check-code',dialog),result=$('#price-check-result',dialog);
+  let latestLookup=0;
+  form.addEventListener('submit',async ev=>{
+    ev.preventDefault();
+    const code=input.value.trim();
+    if(!code){input.focus({preventScroll:true});return;}
+    const lookup=++latestLookup;
+    input.value='';
+    result.innerHTML='<p>Checking current price…</p>';
+    try{
+      const {product}=await api('/products/price-check?code='+encodeURIComponent(code));
+      if(!dialog.isConnected||lookup!==latestLookup)return;
+      result.innerHTML=`<div class="price-check-found"><span>Current selling price</span><strong>${money(product.selling_price_minor)} <small>/ ${e(product.unit)}</small></strong><h3>${e(product.description)}</h3><p>SKU: ${e(product.sku)} · Barcode: ${e(product.barcode||'Not assigned')}</p></div>`;
+    }catch(error){
+      if(!dialog.isConnected||lookup!==latestLookup)return;
+      result.innerHTML=`<div class="price-check-missing"><strong>${e(code)}</strong><p>${e(error.message)}</p></div>`;
+    }finally{
+      if(dialog.isConnected)input.focus({preventScroll:true});
+    }
+  });
+}
 async function renderCheckout(){
+  pendingScanQuantity=null;
+  S.productSelectionId=null;
   if(!S.day||!S.shift)return navigate('checkout');
   const [,printing]=await Promise.all([loadCatalog(),api('/receipt-printer')]);
   S.receiptPrinter=printing.printer;
@@ -220,36 +299,51 @@ async function renderCheckout(){
   if(tickets.tickets.length){S.ticket=await api('/tickets/'+tickets.tickets[0].purchase_ticket_id);S.cart=S.ticket.lines.map(l=>({product_id:l.product_id,quantity:l.quantity}));}
   else{S.ticket=null;S.cart=[];}
   S.cartError=false;
-  $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions">${printerConnectButton(S.receiptPrinter)}${S.shift?button('Close my shift','close-shift','light','clock'):''}${managerAccess()?button(S.day?'Finish day':'Start day','day-steps','light','sun'):''}${button(checkoutFullscreen?'Exit fullscreen':'Fullscreen','toggle-checkout-fullscreen','light',checkoutFullscreen?'collapse':'expand',`aria-pressed="${checkoutFullscreen}"`)}</div></div><div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Search by name, SKU, or barcode" aria-label="Search by product name, SKU, or barcode" value="${e(S.search)}" autocomplete="off" autocapitalize="off" spellcheck="false"><kbd>/</kbd></div><select id="checkout-category" class="checkout-category-select" aria-label="Filter products by category"></select></div><p class="search-hint">Scan a barcode or SKU to add one item. Scan again to add another, or use Qty in the order to set a larger total. Choose a category to browse.</p><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-list" id="product-grid"></div><nav class="product-pager" id="product-pager" aria-label="Browse product pages"></nav><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
+  $('#page').innerHTML=`<div class="checkout-heading"><h1>The counter</h1><p>Good things, one sale at a time.</p><div class="actions"><button type="button" class="btn light check-price-shortcut" data-action="check-price" aria-label="Check price (F1)" aria-keyshortcuts="F1" title="Check price (F1)"><kbd aria-hidden="true">F1</kbd><span>Check price</span></button>${printerConnectButton(S.receiptPrinter)}${S.shift?button('Close my shift','close-shift','light','clock'):''}${managerAccess()?button(S.day?'Finish day':'Start day','day-steps','light','sun'):''}${button(checkoutFullscreen?'Exit fullscreen':'Fullscreen','toggle-checkout-fullscreen','light',checkoutFullscreen?'collapse':'expand',`aria-pressed="${checkoutFullscreen}"`)}</div></div><div class="checkout-layout"><section class="shop-panel"><div class="search-row"><div class="search">${icon('search')}<input id="product-search" placeholder="Scan barcode or SKU, or search by name" aria-label="Scan barcode or SKU, or search by product name" value="${e(S.search)}" autocomplete="off" autocapitalize="off" spellcheck="false"><kbd>/</kbd></div><select id="checkout-category" class="checkout-category-select" aria-label="Filter products by category"></select></div><div class="scan-actions">${button('Find item','scan-submit','green','search')}${button('Qty before scan','scan-quantity','light','','title="Press * with an empty search field"')}<div id="scan-quantity-status" class="scan-quantity-status" role="status" aria-live="polite" hidden><strong id="scan-quantity-label"></strong><span>One successful scan</span>${button('Cancel','clear-scan-quantity','light small')}</div></div><p class="search-hint">Scan a barcode or SKU and press Enter to review quantity before adding. Search by name: Enter reviews one match; use ↑/↓ then Enter to choose from several. Press * first to preset the quantity for one scan.</p><div class="section-line"><strong>Browse products</strong><span id="product-count"></span></div><div class="product-list" id="product-grid"></div><nav class="product-pager" id="product-pager" aria-label="Browse product pages"></nav><p class="stock-note">${icon('shield')}Stock is checked again when you complete the sale.</p></section><aside class="cart" id="cart"></aside></div>`;
+  labelCheckoutShortcuts();
+  syncCheckoutFullscreen();
   const searchInput=$('#product-search');
-  let scanTimer;
   const exactMatches=query=>S.products.filter(p=>p.active&&(p.barcode===query||p.sku.toLowerCase()===query.toLowerCase()));
-  async function addScannedProduct(query,showUnmatched){
-    if(!searchInput.isConnected||S.page!=='checkout'||searchInput.value.trim()!==query||quantityDialogOpening||$('.modal'))return;
-    if(S.paying){if(showUnmatched)toast('Finish the current payment before scanning another.',true);return;}
-    const matches=exactMatches(query);
-    if(matches.length!==1){if(showUnmatched){toast(matches.length?'More than one item matches. Choose one from the list.':'No active product matches that barcode or SKU. Try searching by name.',true);searchInput.select();}return;}
-    const product=matches[0];
-    searchInput.value='';S.search='';S.productPage=0;renderProducts();searchInput.focus({preventScroll:true});
-    try{
-      await addProduct(product.product_id,1);
-      if(!S.cartError)toast('Added 1 × '+product.description+'. Scan again for another or use Qty to set the total.');
-    }catch(error){toast(error.message,true);searchInput.focus({preventScroll:true});}
+  async function submitScannedProduct(){
+    if(!searchInput.isConnected||S.page!=='checkout'||quantityDialogOpening||$('.modal'))return;
+    if(S.paying){toast('Finish the current payment before scanning another item.',true);return;}
+    const query=searchInput.value.trim();
+    if(!query){toast('Scan or search for an item first.',true);searchInput.focus({preventScroll:true});return;}
+    const exact=exactMatches(query),filtered=filteredCheckoutProducts();
+    const selected=filtered.find(p=>p.product_id===S.productSelectionId);
+    let product=null;
+    if(selected)product=selected;
+    else if(exact.length===1)product=exact[0];
+    else if(exact.length===0&&filtered.length===1)product=filtered[0];
+    if(!product){
+      toast(exact.length>1?'More than one item has this code. Use ↑/↓, then Enter, to choose one.':filtered.length?'Use ↑/↓, then Enter, to choose an item.':'No active product matches. Try another name, SKU, or barcode.',true);
+      searchInput.focus({preventScroll:true});return;
+    }
+    const codeMatch=exact.some(p=>p.product_id===product.product_id);
+    try{await productQuantityModal(product.product_id,{clearSearchOnAdd:true,initialQuantity:codeMatch?(pendingScanQuantity??1):1,consumePendingScanQuantity:codeMatch});}
+    catch(error){toast(error.message,true);searchInput.focus({preventScroll:true});}
   }
   searchInput.addEventListener('input',ev=>{
-    clearTimeout(scanTimer);
-    S.search=ev.target.value;S.productPage=0;renderProducts();
-    const query=searchInput.value.trim();
-    if(query&&exactMatches(query).length===1){
-      scanTimer=setTimeout(()=>{if(searchInput.value.trim()===query)void addScannedProduct(query,false);},250);
-    }
+    S.search=ev.target.value;S.productPage=0;S.productSelectionId=null;renderProducts();
   });
   searchInput.addEventListener('keydown',async ev=>{
-    if(ev.key!=='Enter')return;
-    ev.preventDefault();clearTimeout(scanTimer);
-    const query=searchInput.value.trim();
-    if(query)await addScannedProduct(query,true);
+    if(ev.isComposing)return;
+    if((ev.key==='ArrowDown'||ev.key==='ArrowUp')&&!ev.ctrlKey&&!ev.altKey&&!ev.metaKey&&searchInput.value.trim()){
+      const filtered=filteredCheckoutProducts();
+      if(!filtered.length)return;
+      ev.preventDefault();
+      const current=filtered.findIndex(p=>p.product_id===S.productSelectionId);
+      const firstOnPage=S.productPage*PRODUCT_PAGE_SIZE;
+      const next=current<0?(ev.key==='ArrowDown'?firstOnPage:Math.min(firstOnPage+PRODUCT_PAGE_SIZE,filtered.length)-1):(current+(ev.key==='ArrowDown'?1:-1)+filtered.length)%filtered.length;
+      S.productSelectionId=filtered[next].product_id;
+      S.productPage=Math.floor(next/PRODUCT_PAGE_SIZE);
+      renderProducts();
+      $('#product-grid .checkout-product-selected')?.scrollIntoView({block:'nearest'});
+      return;
+    }
+    if(ev.key==='Enter'){ev.preventDefault();if(!ev.repeat)await submitScannedProduct();}
   });
+  $('[data-action=scan-submit]').addEventListener('click',submitScannedProduct);
   renderCategorySelect();renderProducts();renderCart();
   if(recoveredSale){await showReceipt(recoveredSale);toast('Recovered the saved payment. This is the original receipt.');}
   else if(pendingOpen)await paymentModal();
@@ -293,30 +387,140 @@ function viewProductImage(pid){
   modal('Product photo',`<figure class="product-photo-viewer"><img src="/api/images/${product.product_image_id}" alt="${e(product.description)}"><figcaption><strong>${e(product.sku)}</strong><span>${e(product.description)}</span></figcaption></figure><div class="modal-actions">${button('Close','close-modal','light')}</div>`,true);
 }
 const PRODUCT_PAGE_SIZE=24;
+function filteredCheckoutProducts(){
+  const search=S.search.trim().toLowerCase();
+  return S.products.filter(p=>p.active&&(S.category==='all'||String(p.category_id)===String(S.category))&&[p.sku,p.description,p.short_description||'',p.barcode||''].some(v=>v.toLowerCase().includes(search)));
+}
 function renderProducts(){
   const search=S.search.trim().toLowerCase();
-  const products=S.products.filter(p=>p.active&&(S.category==='all'||String(p.category_id)===String(S.category))&&[p.sku,p.description,p.short_description||'',p.barcode||''].some(v=>v.toLowerCase().includes(search)));
+  const list=$('#product-grid'),pager=$('#product-pager'),heading=$('#product-count').parentElement;
+  const showingResults=Boolean(search)||S.category!=='all';
+  heading.hidden=list.hidden=pager.hidden=!showingResults;
+  if(!showingResults){
+    S.productPage=0;
+    S.productSelectionId=null;
+    $('#product-count').textContent='';
+    list.innerHTML='';
+    pager.innerHTML='';
+    return;
+  }
+  heading.querySelector('strong').textContent='Filtered products';
+  const products=filteredCheckoutProducts();
+  if(S.productSelectionId!==null&&!products.some(p=>p.product_id===S.productSelectionId))S.productSelectionId=null;
   const pageCount=Math.max(1,Math.ceil(products.length/PRODUCT_PAGE_SIZE));
   S.productPage=Math.max(0,Math.min(S.productPage,pageCount-1));
   const first=S.productPage*PRODUCT_PAGE_SIZE;
   const pageProducts=products.slice(first,first+PRODUCT_PAGE_SIZE);
-  $('#product-count').textContent=products.length?`Showing ${first+1}–${Math.min(first+PRODUCT_PAGE_SIZE,products.length)} of ${num(products.length)} products`:'0 products';
-  const rows=pageProducts.map(p=>`<tr class="${p.quantity_on_hand?'':'checkout-product-unavailable'}"><td class="checkout-product-code">${e(p.sku)}</td><td class="checkout-product-code">${e(p.barcode||'—')}</td><td class="checkout-product-description">${e(p.description)}${p.product_image_id?` <button type="button" class="checkout-product-photo" data-action="view-product-image" data-id="${p.product_id}" aria-label="View photo of ${e(p.description)}">${icon('image')} Photo</button>`:''}</td><td class="checkout-product-stock ${p.quantity_on_hand<6?'low':''}">${p.quantity_on_hand?`${num(p.quantity_on_hand)} <small>${e(p.unit)}</small>`:'Out of stock'}</td><td class="checkout-product-price">${money(p.amount_minor)}</td><td class="checkout-product-add"><button type="button" data-add="${p.product_id}" aria-label="Choose quantity for ${e(p.description)}" ${p.quantity_on_hand?'':'disabled'}>${icon('plus')}</button></td></tr>`);
+  const selectedProduct=pageProducts.find(p=>p.product_id===S.productSelectionId);
+  $('#product-count').textContent=products.length?`Showing ${first+1}–${Math.min(first+PRODUCT_PAGE_SIZE,products.length)} of ${num(products.length)} products${selectedProduct?' · Selected: '+selectedProduct.sku:''}`:'0 products';
+  const rows=pageProducts.map(p=>`<tr class="${p.quantity_on_hand?'':'checkout-product-unavailable'}${p.product_id===S.productSelectionId?' checkout-product-selected':''}"><td class="checkout-product-code">${e(p.sku)}</td><td class="checkout-product-code">${e(p.barcode||'—')}</td><td class="checkout-product-description">${e(p.description)}${p.product_image_id?` <button type="button" class="checkout-product-photo" data-action="view-product-image" data-id="${p.product_id}" aria-label="View photo of ${e(p.description)}">${icon('image')} Photo</button>`:''}</td><td class="checkout-product-stock ${p.quantity_on_hand<6?'low':''}">${p.quantity_on_hand?`${num(p.quantity_on_hand)} <small>${e(p.unit)}</small>`:'Out of stock'}</td><td class="checkout-product-price">${money(p.amount_minor)}</td><td class="checkout-product-add"><button type="button" data-add="${p.product_id}" aria-label="Choose quantity for ${e(p.description)}" ${p.quantity_on_hand?'':'disabled'}>${icon('plus')}</button></td></tr>`);
   const emptyRow=`<tr><td colspan="6" class="checkout-list-empty">${empty(S.products.length?'No products found':'Your shelves are ready',S.products.length?'Try another name, SKU, or category.':'Add your products and opening stock to get started.',managerAccess()?'new-product':'', 'Add a product')}</td></tr>`;
-  $('#product-grid').innerHTML=`<table class="checkout-product-table" aria-label="Browse products"><colgroup><col class="checkout-col-sku"><col class="checkout-col-barcode"><col class="checkout-col-description"><col class="checkout-col-stock"><col class="checkout-col-price"><col class="checkout-col-add"></colgroup><thead><tr><th scope="col">SKU</th><th scope="col">Barcode</th><th scope="col">Description</th><th scope="col">Stock</th><th scope="col">Unit price</th><th scope="col">Add</th></tr></thead><tbody>${rows.length?rows.join(''):emptyRow}</tbody></table>`;
+  list.innerHTML=`<table class="checkout-product-table" aria-label="Filtered products"><colgroup><col class="checkout-col-sku"><col class="checkout-col-barcode"><col class="checkout-col-description"><col class="checkout-col-stock"><col class="checkout-col-price"><col class="checkout-col-add"></colgroup><thead><tr><th scope="col">SKU</th><th scope="col">Barcode</th><th scope="col">Description</th><th scope="col">Stock</th><th scope="col">Unit price</th><th scope="col">Add</th></tr></thead><tbody>${rows.length?rows.join(''):emptyRow}</tbody></table>`;
   $('#product-pager').innerHTML=pageCount>1?`<button type="button" data-product-page="previous" ${S.productPage===0?'disabled':''}>Previous</button><span>Page ${S.productPage+1} of ${pageCount}</span><button type="button" data-product-page="next" ${S.productPage===pageCount-1?'disabled':''}>Next</button>`:'';
 }
 function cartTotal(){return S.cart.reduce((total,l)=>total+(S.products.find(p=>p.product_id===l.product_id)?.amount_minor||0)*l.quantity,0);}
 function cartPricing(){
   const subtotal=cartTotal(),rate=S.ticket?.discount_percent_bp||0;
   const refundableCapacity=S.cart.reduce((sum,l)=>{const p=S.products.find(p=>p.product_id===l.product_id);return sum+Math.max(0,((p?.amount_minor||0)-1)*l.quantity);},0);
-  const discount=Math.min(Math.floor((subtotal*rate+5000)/10000),refundableCapacity);
+  const manual=S.ticket?.manual_adjustment;
+  const discount=manual&&!S.ticket.manual_adjustment_stale?manual.discount_minor:Math.min(Math.floor((subtotal*rate+5000)/10000),refundableCapacity);
   return {subtotal,discount,total:subtotal-discount};
+}
+async function priceGroupsModal(returnToPayment=false){
+  await cartQueue;
+  requireClient(S.ticket&&S.cart.length&&!S.cartError,'Add items and save the order before adjusting its price.');
+  requireClient(!localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`),'Review the previous payment before changing the price.');
+  S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id);renderCart();
+  const q=S.ticket,existing=q.manual_adjustment;
+  requireClient(q.lines.length,'Add an item first.');
+  const saved=existing?.groups?.length?existing.groups:existing?[{product_ids:existing.product_ids,discount_minor:existing.discount_minor,reason:existing.reason}]:[];
+  const groups=saved.map(g=>({ids:g.product_ids.filter(pid=>q.lines.some(l=>l.product_id===pid)),discount:(g.discount_minor/100).toFixed(2),reason:g.reason}));
+  if(!groups.length)groups.push({ids:[],discount:'',reason:''});
+  let active=0;
+  const groupName=index=>{let label='';do{label=String.fromCharCode(65+index%26)+label;index=Math.floor(index/26)-1;}while(index>=0);return 'Group '+label;};
+  const groupGross=g=>q.lines.filter(l=>g.ids.includes(l.product_id)).reduce((n,l)=>n+l.quantity*l.amount_minor,0);
+  const groupUnits=g=>q.lines.filter(l=>g.ids.includes(l.product_id)).reduce((n,l)=>n+l.quantity,0);
+  const draftDiscount=g=>{try{return g.discount.trim()?minor(g.discount):0;}catch{return 0;}};
+  const body=`<p class="muted adjustment-intro">Choose items, enter the discount and reason, then apply. Each item can be in one group. Changes are saved under your account in the Discount log.</p><div class="adjustment-layout"><div class="adjustment-column"><div class="adjustment-group-list" id="adjustment-group-list"></div><div class="field"><label>Items in selected group <span id="adjustment-group-name" class="visually-hidden"></span></label><div class="adjustment-items" id="adjustment-group-items"></div></div></div><div class="adjustment-column"><div id="adjustment-group-details"></div><div class="adjustment-plan-preview" id="adjustment-plan-preview"></div>${existing?`<button type="button" class="adjustment-remove-all" data-action="remove-price-adjustment">Clear saved discounts</button>`:''}</div></div>`;
+  formModal('Group discounts',body,async (data,form)=>{
+    const requested=groups.map((g,index)=>{
+      requireClient(g.ids.length,`${groupName(index)} needs at least one item.`);
+      const discount=minor(g.discount),gross=groupGross(g);
+      requireClient(discount>0&&discount<=gross-groupUnits(g),`${groupName(index)} needs a discount below its original amount, leaving at least ₱0.01 per unit.`);
+      requireClient(g.reason.trim(),`Enter a reason for ${groupName(index)}.`);
+      return {product_ids:g.ids,discount_minor:discount,reason:g.reason.trim()};
+    });
+    requireClient(requested.length,'Add at least one group.');
+    S.ticket=await api('/tickets/'+q.purchase_ticket_id+'/adjustments','PUT',{version:q.version,quote_hash:q.quote_hash,
+      groups:requested});
+    closeModal();renderCart();
+    if(returnToPayment)await paymentModal();
+    toast('Discounts saved under your account.');
+  },'Apply discounts',true);
+  $('.modal')?.classList.add('adjustment-modal');
+  const form=$('#modal-form');
+  const renderPreview=()=>{
+    const g=groups[active],gross=groupGross(g),discount=draftDiscount(g),all=groups.reduce((sum,item)=>sum+draftDiscount(item),0);
+    $('#adjustment-group-preview',form).textContent=`Selected items ${money(gross)} − ${money(discount)} = ${money(gross-discount)}`;
+    $('#adjustment-plan-preview',form).innerHTML=`<span>Original total</span><span>${money(q.subtotal_minor)}</span><span>Discounts</span><span>−${money(all)}</span><strong>Total to pay</strong><strong>${money(q.subtotal_minor-all)}</strong>`;
+  };
+  const render=()=>{
+    const g=groups[active],owned=new Set(groups.flatMap((item,index)=>index===active?[]:item.ids));
+    $('#adjustment-group-list',form).innerHTML=`<div class="adjustment-group-heading"><strong>Groups</strong><button type="button" class="btn light small" data-group-add ${groups.length>=q.lines.length?'disabled':''}>+ Add group</button></div><div class="adjustment-group-tabs">${groups.map((item,index)=>`<button type="button" class="${index===active?'active':''}" data-group-index="${index}"><strong>${groupName(index)}</strong><small>${item.ids.length} ${item.ids.length===1?'item':'items'} · ${money(draftDiscount(item))} off</small></button>`).join('')}</div>`;
+    $('#adjustment-group-name',form).textContent=groupName(active);
+    $('#adjustment-group-items',form).innerHTML=q.lines.map(l=>`<label class="adjustment-item"><input type="checkbox" data-group-product="${l.product_id}" ${g.ids.includes(l.product_id)?'checked':''} ${owned.has(l.product_id)?'disabled':''}><span>${e(l.sku)} · ${e(l.description)}<small>${l.quantity} × ${money(l.amount_minor)} = ${money(l.quantity*l.amount_minor)}${owned.has(l.product_id)?' · In another group':''}</small></span></label>`).join('');
+    $('#adjustment-group-details',form).innerHTML=`<div class="adjustment-group-heading"><strong>Discount details</strong><button type="button" class="btn light small" data-group-remove>Remove group</button></div><div class="field"><label for="adjustment-discount">Discount amount (₱)</label><input id="adjustment-discount" type="text" inputmode="decimal" placeholder="0.00" value="${e(g.discount)}" required></div><div class="field"><label for="adjustment-reason">Reason</label><input id="adjustment-reason" type="text" maxlength="300" value="${e(g.reason)}" required></div><div class="adjustment-preview" id="adjustment-group-preview"></div>`;
+    renderPreview();
+  };
+  form.addEventListener('click',ev=>{
+    const add=ev.target.closest('[data-group-add]'),remove=ev.target.closest('[data-group-remove]'),tab=ev.target.closest('[data-group-index]');
+    if(add){groups.push({ids:[],discount:'',reason:''});active=groups.length-1;render();}
+    else if(remove){groups.splice(active,1);if(!groups.length)groups.push({ids:[],discount:'',reason:''});active=Math.min(active,groups.length-1);render();}
+    else if(tab){active=Number(tab.dataset.groupIndex);render();}
+  });
+  form.addEventListener('input',ev=>{
+    if(ev.target.id==='adjustment-discount')groups[active].discount=ev.target.value;
+    else if(ev.target.id==='adjustment-reason')groups[active].reason=ev.target.value;
+    else return;
+    const tab=$(`[data-group-index="${active}"] small`,form);if(tab)tab.textContent=`${groups[active].ids.length} ${groups[active].ids.length===1?'item':'items'} · ${money(draftDiscount(groups[active]))} off`;
+    renderPreview();
+  });
+  form.addEventListener('change',ev=>{
+    if(!ev.target.matches('[data-group-product]'))return;
+    const id=Number(ev.target.dataset.groupProduct),ids=groups[active].ids;
+    if(ev.target.checked&&!ids.includes(id))ids.push(id);
+    if(!ev.target.checked)groups[active].ids=ids.filter(pid=>pid!==id);
+    render();
+  });
+  render();
+}
+async function removePriceAdjustment(){
+  await cartQueue;requireClient(S.ticket?.manual_adjustment,'There is no adjustment to remove.');
+  S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id+'/adjustment','DELETE',{version:S.ticket.version});
+  closeModal();
+  renderCart();toast('Price adjustment removed.');
+}
+async function clearPresetDiscount(){
+  await cartQueue;
+  requireClient(S.ticket&&!S.cartError,'Refresh the order before changing its discount.');
+  requireClient(!localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`),
+    'Review the previous payment result before changing this order.');
+  S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id+'/discount','PUT',
+    {version:S.ticket.version,discount_percent_bp:0});
+  renderCart();toast('Preset discount cleared.');
 }
 function renderCart(){
   if(!$('#cart'))return;const units=S.cart.reduce((a,l)=>a+l.quantity,0);
-  const pricing=cartPricing(),rate=S.ticket?.discount_percent_bp||0,rates=S.ticket?.discount_rates||[];
-  $('#cart').innerHTML=`<div class="cart-header"><h2>Current order <span class="count-bubble">${units}</span></h2><button class="icon-btn" data-action="cancel-ticket" title="Cancel order" aria-label="Cancel order" ${!S.ticket?'disabled':''}>${icon('close')}</button></div><div class="cart-ticket"><span>${S.ticket?e(S.ticket.ticket_number):'A new order awaits'}</span><span>${e(S.user.display_name.split(' ')[0])}</span></div><div class="cart-lines">${S.cart.length?`<table class="cart-table" aria-label="Current order items"><colgroup><col class="cart-col-sku"><col class="cart-col-description"><col class="cart-col-quantity"><col class="cart-col-total"></colgroup><thead><tr><th scope="col">SKU</th><th scope="col">DESC</th><th scope="col" class="cart-quantity-cell">QTY</th><th scope="col" class="right">TOTAL</th></tr></thead><tbody>${S.cart.map(l=>{const p=S.products.find(p=>p.product_id===l.product_id);if(!p)return '';return `<tr><td class="cart-row-sku">${e(p.sku)}</td><td><button type="button" class="btn light small cart-view-description" data-action="view-cart-description" data-id="${p.product_id}" aria-label="View description for ${e(p.sku)}">View</button></td><td class="cart-quantity-cell"><div class="qty-control"><button type="button" data-qty="${p.product_id}" data-delta="-1" aria-label="Remove one ${e(p.description)}">−</button><button type="button" class="cart-set-quantity" data-action="set-cart-quantity" data-id="${p.product_id}" aria-label="Set total quantity for ${e(p.description)}">Qty ${l.quantity}</button><button type="button" data-qty="${p.product_id}" data-delta="1" aria-label="Add one ${e(p.description)}">+</button></div></td><td class="right cart-row-total">${money(p.amount_minor*l.quantity)}</td></tr>`;}).join('')}</tbody></table>`:`<div class="cart-empty"><p>A little empty for now.<br>Choose a product to start an order.</p></div>`}</div><div class="cart-summary"><div class="sum-row"><span>Subtotal</span><span>${money(pricing.subtotal)}</span></div>${rates.length?`<div class="cart-discount-choice"><label for="discount-choice">Discount</label><select id="discount-choice" aria-label="Order discount" ${cartPending||S.cartError?'disabled':''}><option value="0">No discount</option>${rates.map(r=>`<option value="${r.percent_bp}" ${rate===r.percent_bp?'selected':''}>${percentLabel(r.percent_bp)}</option>`).join('')}</select></div>`:''}${pricing.discount?`<div class="sum-row"><span>Discount (${percentLabel(rate)})</span><span>−${money(pricing.discount)}</span></div>`:''}<div class="sum-row"><span>Items</span><span>${units} ${units===1?'item':'items'}</span></div><div class="sum-row total"><span>Total amount</span><strong>${money(pricing.total)}</strong></div>${button('Review payment','pay','green','arrow',!S.cart.length||!S.shift||S.cartError?'disabled':'')}</div><div class="cart-foot">${S.cartError?'Cart needs a refresh before payment':S.ticket?'Saved to this ticket · Cash payment':'One ticket. One payment. One receipt.'}</div>`;
+  const pricing=cartPricing(),rate=S.ticket?.discount_percent_bp||0;
+  $('#cart').innerHTML=`<div class="cart-header"><h2>Current order <span class="count-bubble">${units}</span></h2><button class="icon-btn" data-action="cancel-ticket" title="Cancel order" aria-label="Cancel order" ${!S.ticket?'disabled':''}>${icon('close')}</button></div><div class="cart-ticket"><span>${S.ticket?e(S.ticket.ticket_number):'A new order awaits'}</span><span>${e(S.user.display_name.split(' ')[0])}</span></div><div class="cart-lines">${S.cart.length?`<table class="cart-table" aria-label="Current order items"><colgroup><col class="cart-col-sku"><col class="cart-col-description"><col class="cart-col-quantity"><col class="cart-col-total"></colgroup><thead><tr><th scope="col">SKU</th><th scope="col">DESC</th><th scope="col" class="cart-quantity-cell">QTY</th><th scope="col" class="right">TOTAL</th></tr></thead><tbody>${S.cart.map(l=>{const p=S.products.find(p=>p.product_id===l.product_id);if(!p)return '';return `<tr><td class="cart-row-sku">${e(p.sku)}</td><td><button type="button" class="btn light small cart-view-description" data-action="view-cart-description" data-id="${p.product_id}" aria-label="View description for ${e(p.sku)}">View</button></td><td class="cart-quantity-cell"><div class="qty-control"><button type="button" data-qty="${p.product_id}" data-delta="-1" aria-label="Remove one ${e(p.description)}">−</button><button type="button" class="cart-set-quantity" data-action="set-cart-quantity" data-id="${p.product_id}" aria-label="Set total quantity for ${e(p.description)}">Qty ${l.quantity}</button><button type="button" data-qty="${p.product_id}" data-delta="1" aria-label="Add one ${e(p.description)}">+</button></div></td><td class="right cart-row-total">${money(p.amount_minor*l.quantity)}</td></tr>`;}).join('')}</tbody></table>`:`<div class="cart-empty"><p>A little empty for now.<br>Choose a product to start an order.</p></div>`}</div><div class="cart-summary"><div class="sum-row"><span>Subtotal</span><span>${money(pricing.subtotal)}</span></div>${pricing.discount?`<div class="sum-row"><span>Discount (${percentLabel(rate)})</span><span>−${money(pricing.discount)}</span></div>`:''}<div class="sum-row"><span>Items</span><span>${units} ${units===1?'item':'items'}</span></div><div class="sum-row total"><span>Total amount</span><strong>${money(pricing.total)}</strong></div>${button('Review payment','pay','green','arrow',!S.cart.length||!S.shift||S.cartError?'disabled':'')}</div><div class="cart-foot">${S.cartError?'Cart needs a refresh before payment':S.ticket?'Saved to this ticket · Cash payment':'One ticket. One payment. One receipt.'}</div>`;
+  const manual=S.ticket?.manual_adjustment;
+  const itemCountRow=[...$('#cart .cart-summary').querySelectorAll('.sum-row')].find(el=>el.firstElementChild?.textContent==='Items');
+  itemCountRow?.remove();
+  if(manual&&pricing.discount){const row=[...$('#cart .cart-summary').querySelectorAll('.sum-row')].find(el=>el.firstElementChild?.textContent?.startsWith('Discount ('));if(row)row.firstElementChild.textContent=manual.groups?.length?'Approved group discounts':'Approved price adjustment';}
+  if(S.ticket?.manual_adjustment_stale){
+    $('#cart .cart-summary .sum-row.total').insertAdjacentHTML('beforebegin','<p class="price-adjustment-warning">Group discounts need review after the order changed.</p>');
+    $('[data-action=pay]').innerHTML=icon('arrow')+'Review discounts';
+  }
   if(S.ticket){const transfer=document.createElement('button');transfer.type='button';transfer.className='icon-btn';transfer.dataset.action='transfer-ticket';transfer.setAttribute('aria-label','Transfer this order');transfer.title='Transfer this order';transfer.innerHTML=icon('users');$('.cart-ticket').appendChild(transfer);}
   if(cartPending){$('.cart-foot').textContent='Saving this ticket…';$('[data-action=pay]').disabled=true;}
 }
@@ -347,7 +551,7 @@ function wireQuantityKeypad(form,quantityInput){
     quantityInput.focus({preventScroll:true});
   });
 }
-async function productQuantityModal(pid){
+async function productQuantityModal(pid,{clearSearchOnAdd=false,initialQuantity=1,consumePendingScanQuantity=false}={}){
   if(quantityDialogOpening||$('.modal')||S.paying)return;
   quantityDialogOpening=true;
   try{
@@ -359,8 +563,9 @@ async function productQuantityModal(pid){
     requireClient(product?.active,'This product is no longer available. Refresh the counter.');
     const available=product.quantity_on_hand-existing;
     requireClient(available>0,'All available stock for this item is already in the order.');
+    const initialAmount=initialQuantity<=available?money(product.amount_minor*initialQuantity):'—';
     const details=`<div class="quantity-product field full"><div class="cart-thumb">${productVisual(product)}</div><div class="quantity-product-price"><small>Unit price</small><strong>${money(product.amount_minor)} / ${e(product.unit)}</strong></div></div><div class="quantity-product-identifiers field full"><div><span>SKU</span><strong>${e(product.sku)}</strong></div><div><span>Barcode</span><strong>${e(product.barcode||'Not assigned')}</strong></div></div><div class="quantity-product-description field full"><span>Description</span><p>${e(product.description)}</p></div>`;
-    formModal('Choose quantity',`<div class="quantity-main">${details}<div class="field full"><small>Available to add: ${available} ${e(product.unit)}.${existing?' Already in order: '+existing+' '+e(product.unit)+'.':''} Nothing is added until you confirm.</small></div>`+field('Quantity to add','quantity','number','1',`required min="1" max="${available}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>Amount to add</span><strong id="quantity-add-total">${money(product.amount_minor)}</strong></div></div>`+quantityKeypad(),async data=>{
+    formModal('Choose quantity',`<div class="quantity-main">${details}<div class="field full"><small>Available to add: ${available} ${e(product.unit)}.${existing?' Already in order: '+existing+' '+e(product.unit)+'.':''} Nothing is added until you confirm.</small></div>`+field('Quantity to add','quantity','number',initialQuantity,`required min="1" max="${available}" step="1" inputmode="numeric"`)+`<div class="change-line" role="status" aria-live="polite"><span>Amount to add</span><strong id="quantity-add-total">${initialAmount}</strong></div></div>`+quantityKeypad(),async data=>{
       const quantity=Number(data.quantity);
       requireClient(Number.isSafeInteger(quantity)&&quantity>=1,'Enter a whole quantity of at least 1.');
       requireClient(!S.cartError,'Refresh the counter to recover the saved cart.');
@@ -371,10 +576,18 @@ async function productQuantityModal(pid){
       requireClient(current.amount_minor===product.amount_minor,'The selling price changed. Reopen the product to review its price.');
       await addProduct(pid,quantity);
       requireClient(!S.cartError,'The order could not be saved. Refresh the counter before trying again.');
-      closeModal();renderProducts();toast(quantity+' × '+product.description+' added to the order.');
+      closeModal();
+      if(consumePendingScanQuantity){pendingScanQuantity=null;updateScanQuantityIndicator();}
+      if(clearSearchOnAdd){
+        const search=$('#product-search');
+        if(search){search.value='';S.search='';S.productPage=0;S.productSelectionId=null;}
+      }
+      renderProducts();toast(quantity+' × '+product.description+' added to the order.');
     },'Add to order',true);
+    $('.modal')?.classList.add('quantity-product-modal');
     const form=$('#modal-form'),quantityInput=$('[name=quantity]',form),confirmButton=$('[type=submit]',form);
     form.classList.add('quantity-modal-form');
+    form.addEventListener('keydown',ev=>{if(ev.key==='Enter'&&ev.repeat)ev.preventDefault();});
     wireQuantityKeypad(form,quantityInput);
     confirmButton.disabled=true;
     setTimeout(()=>{if(form.isConnected)confirmButton.disabled=false;},250);
@@ -411,6 +624,7 @@ async function setCartQuantityModal(pid){
       requireClient(!S.cartError,'The order could not be saved. Refresh the counter before trying again.');
       closeModal();renderProducts();toast(quantity?`Total quantity set to ${quantity}.`:'Item removed from the order.');
     },'Set quantity',true);
+    $('.modal')?.classList.add('quantity-product-modal');
     const form=$('#modal-form'),quantityInput=$('[name=quantity]',form);
     form.classList.add('quantity-modal-form');
     wireQuantityKeypad(form,quantityInput);
@@ -434,9 +648,13 @@ async function addProduct(pid,delta=1){
   if(!Number.isSafeInteger(qty)||qty<0||qty>1_000_000)throw new Error('Enter a valid whole quantity.');
   if(qty>p.quantity_on_hand)throw new Error('That quantity exceeds the stock currently available.');
   if(qty<=0)S.cart=S.cart.filter(l=>l.product_id!==pid);else if(existing)existing.quantity=qty;else S.cart.push({product_id:pid,quantity:qty});
-  const snapshot=S.cart.map(l=>({...l}));cartPending++;renderCart();
+  const snapshot=S.cart.map(l=>({...l}));const clearedAdjustment=!!S.ticket?.manual_adjustment;
+  const groupPlan=!!S.ticket?.manual_adjustment?.groups?.length;
+  if(clearedAdjustment)S.ticket={...S.ticket,manual_adjustment:groupPlan?S.ticket.manual_adjustment:null,manual_adjustment_stale:groupPlan};
+  cartPending++;renderCart();
   cartQueue=cartQueue.then(async()=>{try{if(!S.cartError)S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id,'PUT',{version:S.ticket.version,lines:snapshot});}catch(error){S.cartError=true;toast(error.message+' Refresh the counter to recover the saved cart.',true);}finally{cartPending--;renderCart();}});
   await cartQueue;
+  if(clearedAdjustment&&!S.cartError)toast(groupPlan?'Items changed. Review and apply the discount groups again.':'Items changed. The price adjustment was cleared.');
 }
 function askPaymentConfirmation(total,paid,ticketNumber,retry=false){
   return new Promise(resolve=>{
@@ -461,10 +679,18 @@ async function paymentModal(){
   const q=await api('/tickets/'+S.ticket.purchase_ticket_id);S.ticket=q;
   if(q.sale_id){await showReceipt(q.sale_id);return;}
   requireClient(q.lines.length,'Add an item first.');
+  if(q.manual_adjustment_stale){await priceGroupsModal(true);return;}
+  pendingScanQuantity=null;updateScanQuantityIndicator();
   const pendingKey=`bazaar-pending-${S.user.user_id}-${q.purchase_ticket_id}`;
   let pending;try{pending=JSON.parse(localStorage.getItem(pendingKey)||'null');}catch{pending=null;}
   const total=q.total_minor;
-  modal('Complete this order',`<form id="payment-form" class="form-grid"><div class="payment-total field full"><small>${e(q.ticket_number)} · ${q.lines.reduce((a,l)=>a+l.quantity,0)} items</small><div class="sum-row"><span>Subtotal</span><span>${money(q.subtotal_minor)}</span></div>${q.discount_minor?`<div class="sum-row"><span>Discount (${percentLabel(q.discount_percent_bp)})</span><span>−${money(q.discount_minor)}</span></div>`:''}<strong>${money(total)}</strong><small>Cash payment · No added tax</small></div><div class="field full"><label for="amount-paid">Amount paid</label><input id="amount-paid" name="amount" type="text" inputmode="decimal" placeholder="0.00" value="${pending?(pending.tendered_minor/100).toFixed(2):''}" required autocomplete="off" ${pending?'readonly':''}></div><div class="quick-cash">${[total,...[10000,20000,50000,100000].filter(n=>n>total).slice(0,3)].map(n=>`<button type="button" data-cash="${n}" ${pending?'disabled':''}>${n===total?'Exact':money(n)}</button>`).join('')}</div><div class="change-line"><span>Change due</span><strong id="change-due">${money(pending?pending.tendered_minor-total:0)}</strong></div><div class="form-error" role="alert"></div><div class="field full"><small>${pending?'This payment was submitted before. Retrying will retrieve the same sale if it was saved.':'Check the amount before confirming. A receipt follows the saved sale.'}</small></div><div class="modal-actions">${button('Back','close-modal','light')}<button type="submit" class="btn green">${pending?'Check / retry payment':'Confirm payment'}${icon('check')}</button></div></form>`);
+  const itemCount=q.lines.reduce((a,l)=>a+l.quantity,0);
+  const discountLabel=q.manual_adjustment?.groups?.length?'Group discounts':q.manual_adjustment?'Agreed price discount':q.discount_percent_bp?`Order discount (${percentLabel(q.discount_percent_bp)})`:'Discount';
+  const priceBreakdown=q.discount_minor?`<div class="sum-row"><span>Original total</span><span>${money(q.subtotal_minor)}</span></div><div class="sum-row discount"><span>${discountLabel}</span><span>−${money(q.discount_minor)}</span></div>`:'';
+  modal('Take payment',`<form id="payment-form" class="form-grid"><div class="payment-total field full"><div class="payment-order-meta"><span>Order ${e(q.ticket_number)}</span><span>${num(itemCount)} ${itemCount===1?'item':'items'}</span></div><div class="payment-amounts">${priceBreakdown}<div class="payment-due"><span>Amount to collect</span><strong>${money(total)}</strong></div></div></div><div class="field full"><label for="amount-paid">Cash received</label><input id="amount-paid" name="amount" type="text" inputmode="decimal" placeholder="0.00" value="${pending?(pending.tendered_minor/100).toFixed(2):''}" required autocomplete="off" ${pending?'readonly':''}></div><div class="quick-cash">${[total,...[10000,20000,50000,100000].filter(n=>n>total).slice(0,3)].map(n=>`<button type="button" data-cash="${n}" ${pending?'disabled':''}>${n===total?'Exact':money(n)}</button>`).join('')}</div><div class="change-line"><span>Change due</span><strong id="change-due">${money(pending?pending.tendered_minor-total:0)}</strong></div><div class="form-error" role="alert"></div>${pending?'<p class="payment-retry-note field full">This payment was already submitted. Checking again will retrieve the same sale if it was saved.</p>':''}<div class="modal-actions">${button('Back','close-modal','light')}<button type="submit" class="btn green">${pending?'Check / retry payment':'Confirm payment'}${icon('check')}</button></div></form>`);
+  $('.modal')?.classList.add('payment-modal');
+  if(!pending)$('#payment-form .payment-total').insertAdjacentHTML('afterend',`<div class="field full payment-price-adjust"><span>Discount</span>${button(q.manual_adjustment?.groups?.length?'Edit discount groups':q.manual_adjustment?'Edit discount':'Apply group discount','adjust-price-from-payment','light small')}</div>`);
+  if(!pending&&q.discount_percent_bp&&!q.manual_adjustment)$('.payment-price-adjust').insertAdjacentHTML('beforeend',button('Clear preset discount','clear-preset-discount-from-payment','light small'));
   if(q.duplicate_warning){const warning=document.createElement('div');warning.className='notice field full';warning.innerHTML=`<label class="check-field"><input id="duplicate-reviewed" type="checkbox" required ${pending?.duplicate_reviewed?'checked':''}><span>A matching order (${e(receiptNumber(q.duplicate_warning.receipt_number))}) was saved in the last two minutes. I checked that this is a separate customer purchase.</span></label>`;$('#payment-form').prepend(warning);}
   $('#amount-paid').addEventListener('input',()=>{try{$('#change-due').textContent=money(Math.max(0,minor($('#amount-paid').value)-total));}catch{$('#change-due').textContent='—';}});
   $('#payment-form').addEventListener('submit',async ev=>{
@@ -494,6 +720,12 @@ async function showReceipt(sid,copyType='customer'){
   const r=await api('/sales/'+sid);currentReceipt=r;const s=r.sale,p=r.payment;
   const copyLabel=copyType==='store'?'STORE COPY':'CUSTOMER COPY';
   modal('Acknowledgement receipt',`<div class="receipt-content">${receiptCompanyHeader()}<div class="receipt-heading"><p class="receipt-title">ACKNOWLEDGEMENT RECEIPT</p><p class="receipt-copy-label">${copyLabel}</p></div><table class="receipt-items"><thead><tr><th>QTY</th><th>DESCRIPTION</th><th class="right">PRICE</th><th class="right">AMOUNT</th></tr></thead><tbody>${r.lines.map(l=>`<tr><td>${l.quantity}</td><td>${e(l.short_description_snapshot||l.description_snapshot)}</td><td class="right">${money(l.unit_price_minor)}</td><td class="right">${money(l.quantity*l.unit_price_minor)}</td></tr>`).join('')}</tbody></table><div class="receipt-totals"><div class="sum-row"><span>Total amount</span><span>${money(s.subtotal_minor)}</span></div>${s.discount_minor?`<div class="sum-row"><span>Discount (${percentLabel(s.discount_percent_bp)})</span><span>−${money(s.discount_minor)}</span></div>`:''}<div class="sum-row total"><span>TOTAL TO PAY</span><strong>${money(s.total_minor)}</strong></div><div class="sum-row"><span>Amount tendered</span><span>${money(p.tendered_minor)}</span></div><div class="sum-row"><span>Change</span><span>${money(p.change_minor)}</span></div><div class="sum-row"><span>Number of items</span><span>${r.lines.reduce((n,l)=>n+l.quantity,0)}</span></div></div><div class="receipt-meta">Transaction No.: ${e(receiptNumber(s.receipt_number))}<br>Date: ${e(s.business_date)}<br>Cashier: ${e(s.display_name)}</div>${receiptCompanyFooter()}<div class="receipt-disclaimer">THIS DOCUMENT IS NOT VALID FOR CLAIM OF INPUT TAX</div></div>${r.corrections.length?`<div class="receipt-extra notice">${r.corrections.length} correction(s) linked · ${money(r.corrections.reduce((a,c)=>a+c.refund_total_minor,0))} refunded</div>`:''}<div class="modal-actions receipt-actions">${managerAccess()?button('Return / void','return-sale','light','refresh',`data-id="${sid}"`):''}${button('Customer copy','print-receipt','green','print',`data-id="${sid}" data-copy="customer"`)}${managerAccess()?button('Store copy','print-receipt','light','print',`data-id="${sid}" data-copy="store"`):''}</div>`);currentReceipt=r;
+  if(r.adjustment){const row=[...$('.receipt-totals').querySelectorAll('.sum-row')].find(el=>el.firstElementChild?.textContent?.startsWith('Discount ('));if(row){row.firstElementChild.textContent=r.adjustment.groups?.length?'Total group discounts':'Approved price adjustment';if(r.adjustment.groups?.length)row.insertAdjacentHTML('beforebegin',r.adjustment.groups.map(g=>`<div class="sum-row"><span>${e(g.name)} discount</span><span>−${money(g.discount_minor)}</span></div>`).join(''));}}
+  if(r.adjustment?.groups?.length){
+    const groupByProduct=new Map(r.adjustment.groups.flatMap(g=>g.product_ids.map(pid=>[pid,g.name])));
+    const rows=$('.receipt-items tbody').querySelectorAll('tr');
+    r.lines.forEach((line,index)=>{const name=groupByProduct.get(line.product_id);if(name)rows[index].children[1].insertAdjacentHTML('beforeend',`<small class="receipt-item-group">${e(name)}</small>`);});
+  }
   void refreshReceiptPrintStatus(sid);
 }
 function openDay(continueToCheckout=false){const today=new Intl.DateTimeFormat('en-CA',{timeZone:S.bazaar?.timezone||'Asia/Manila',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());formModal('Open the next business day',field('Business date','business_date','date',today,'required')+approval(),async data=>{await api('/days/open','POST',data);closeModal();await boot();toast('The business day is open.');if(continueToCheckout)openShift(true);},'Open day');}
@@ -647,7 +879,7 @@ function stockForm(){
   if(!products.length)return productForm();
   const byId=new Map(products.map(p=>[p.product_id,p]));
   const selected=new Set(),quantities=new Map();
-  let kind='in',search='',page=0,reference='',pendingPayload=null;
+  let kind='in',search='',page=0,pendingPayload=null;
   const pageSize=40;
   const kindName=()=>kind==='opening'?'Opening stock':'Stock in';
   const available=()=>products.filter(p=>kind!=='opening'||!p.has_stock_history);
@@ -676,16 +908,16 @@ function stockForm(){
   }
   function reviewStep(){
     const items=[...selected].map(id=>byId.get(id)).filter(Boolean).sort((a,b)=>a.description.localeCompare(b.description));
-    setModal(`<div class="stock-step">Step 2 of 2 · Review quantities</div><form id="stock-review-form"><p class="stock-review-intro">${kindName()} · ${items.length} ${items.length===1?'item':'items'}. Enter how many units to add beside each item.</p><div class="stock-review-list"><div class="stock-review-head"><span>Item</span><span>On hand</span><span>${kind==='opening'?'Starting qty':'Qty to add'}</span></div>${items.map(p=>`<div class="stock-review-row"><label for="stock-qty-${p.product_id}"><strong>${e(p.description)}</strong><small>${e(p.sku)}</small></label><span>${num(p.quantity_on_hand)}</span><input id="stock-qty-${p.product_id}" name="quantity-${p.product_id}" type="number" inputmode="numeric" step="1" min="1" max="1000000" required value="${quantities.get(p.product_id)||''}" aria-label="Quantity for ${e(p.description)}"></div>`).join('')}</div><div class="stock-review-total" id="stock-review-total"></div><div class="form-grid">${field('Reference number (optional)','reference_no','text',reference,'maxlength="80"')}${approval()}</div><div class="stock-warning" role="note"><strong>Review before saving.</strong> These quantities will be added to stock together. Posting creates a permanent stock record and cannot be undone here. Check every item and quantity carefully.</div><label class="stock-confirm"><input type="checkbox" name="reviewed" required> I checked all items and quantities and understand this posting cannot be undone.</label><div class="form-error" role="alert"></div><div class="modal-actions"><button type="button" class="btn light" id="stock-back">Back to items</button><button type="submit" class="btn green">Post ${items.length} ${items.length===1?'item':'items'} ${icon('arrow')}</button></div></form>`);
+    setModal(`<div class="stock-step">Step 2 of 2 · Review quantities</div><form id="stock-review-form"><p class="stock-review-intro">${kindName()} · ${items.length} ${items.length===1?'item':'items'}. Enter how many units to add beside each item.</p><div class="stock-review-list"><div class="stock-review-head"><span>Item</span><span>On hand</span><span>${kind==='opening'?'Starting qty':'Qty to add'}</span></div>${items.map(p=>`<div class="stock-review-row"><label for="stock-qty-${p.product_id}"><strong>${e(p.description)}</strong><small>${e(p.sku)}</small></label><span>${num(p.quantity_on_hand)}</span><input id="stock-qty-${p.product_id}" name="quantity-${p.product_id}" type="number" inputmode="numeric" step="1" min="1" max="1000000" required value="${quantities.get(p.product_id)||''}" aria-label="Quantity for ${e(p.description)}"></div>`).join('')}</div><div class="stock-review-total" id="stock-review-total"></div><div class="form-grid">${approval()}</div><div class="stock-warning" role="note"><strong>Review before saving.</strong> These quantities will be added to stock together. Posting creates a permanent stock record and cannot be undone here. Check every item and quantity carefully.</div><label class="stock-confirm"><input type="checkbox" name="reviewed" required> I checked all items and quantities and understand this posting cannot be undone.</label><div class="form-error" role="alert"></div><div class="modal-actions"><button type="button" class="btn light" id="stock-back">Back to items</button><button type="submit" class="btn green">Post ${items.length} ${items.length===1?'item':'items'} ${icon('arrow')}</button></div></form>`);
     const form=$('#stock-review-form');
     const lines=()=>items.map(p=>({product_id:p.product_id,quantity:Number($(`[name="quantity-${p.product_id}"]`,form).value)}));
     const updateTotal=()=>{const values=lines();const valid=values.every(l=>Number.isSafeInteger(l.quantity)&&l.quantity>=1&&l.quantity<=1000000);$('#stock-review-total',form).textContent=valid?`${num(values.reduce((sum,l)=>sum+l.quantity,0))} total units will be added across ${items.length} items`:'Enter a positive whole-number quantity for every item.';};
-    form.addEventListener('input',ev=>{if(ev.target.type==='number'){quantities.set(Number(ev.target.name.slice(9)),ev.target.value);updateTotal();}if(ev.target.name==='reference_no')reference=ev.target.value;});
+    form.addEventListener('input',ev=>{if(ev.target.type==='number'){quantities.set(Number(ev.target.name.slice(9)),ev.target.value);updateTotal();}});
     $('#stock-back',form).addEventListener('click',()=>{if(pendingPayload){errorAt(form).textContent='The last request may have posted. Check movement history before changing this list.';return;}selectStep();});
     form.addEventListener('submit',async ev=>{
       ev.preventDefault();if(!form.reportValidity())return;
       const stockLines=lines();if(!stockLines.every(l=>Number.isSafeInteger(l.quantity)&&l.quantity>=1&&l.quantity<=1000000)){errorAt(form).textContent='Enter a positive whole-number quantity for every item.';return;}
-      const body={document_type:kind,reference_no:reference.trim(),manager_password:$('[name=manager_password]',form).value,lines:stockLines};
+      const body={document_type:kind,manager_password:$('[name=manager_password]',form).value,lines:stockLines};
       if(pendingPayload){const prior=pendingPayload;const same=JSON.stringify({...prior,request_key:undefined})===JSON.stringify({...body,request_key:undefined});if(!same){errorAt(form).textContent='The last request may have posted. Retry without changing the details, then check movement history.';return;}}
       else pendingPayload={...body,request_key:key()};
       const submit=$('[type=submit]',form);submit.disabled=true;errorAt(form).textContent='';
@@ -816,10 +1048,11 @@ async function renderReports(){const filters=await filterBar();const reportQuery
   const productPager=productTotal>productPageSize?`<nav class="report-product-pager" aria-label="Report product pages">${button('Previous','report-product-page','light small','',`data-step="-1" ${reportProductPage===1?'disabled':''}`)}<span>${num(productFirst+1)}–${num(Math.min(productFirst+productPageSize,productTotal))} of ${num(productTotal)} · Page ${reportProductPage} of ${productPages}</span>${button('Next','report-product-page','light small','',`data-step="1" ${reportProductPage===productPages?'disabled':''}`)}</nav>`:'';
   const unitLabel=(count,action)=>`${num(count)} ${count===1?'unit':'units'} ${action}`;
   const reportSection=(title,section,rows,footer='',extraClass='')=>{
-    const records=rows.length?table(['Description','Unit counts','Sales','Refunds','Net'],rows.map(row=>`<tr><td><strong>${e(row.label)}</strong></td><td><div class="report-unit-count"><strong>${unitLabel(row.units,'sold')}</strong>${row.returned_units?`<span>${unitLabel(row.returned_units,'returned or voided')}</span>`:''}</div></td><td>${reportMoney(row.sales_minor)}</td><td>${reportMoney(row.refunds_minor)}</td><td><strong>${reportMoney(row.sales_minor-row.refunds_minor)}</strong></td></tr>`)):empty('No activity in this view','Sales and returns will appear here.');
+    const records=rows.length?table(['Description','Unit counts','Original','Discount','Sales','Refunds','Net'],rows.map(row=>`<tr><td><strong>${e(row.label)}</strong></td><td><div class="report-unit-count"><strong>${unitLabel(row.units,'sold')}</strong>${row.returned_units?`<span>${unitLabel(row.returned_units,'returned or voided')}</span>`:''}</div></td><td>${reportMoney(row.gross_minor)}</td><td>${reportMoney(row.discount_minor)}</td><td>${reportMoney(row.sales_minor)}</td><td>${reportMoney(row.refunds_minor)}</td><td><strong>${reportMoney(row.sales_minor-row.refunds_minor)}</strong></td></tr>`)):empty('No activity in this view','Sales and returns will appear here.');
     return `<section class="panel report-section ${extraClass}"><div class="panel-title"><h2>${title}</h2>${button('Show graph','open-report-graph','light small','chart',`data-section="${section}" aria-haspopup="dialog"`)}</div>${records+footer}</section>`;
   };
-  $('#page').innerHTML=heading(r.event_name||'Reports','',(reportEventId?button('Current event','current-report','light','refresh'):'')+button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${reportQuery}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${reportMoney(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Gross sales</label><div class="value">${reportMoney(t.gross_minor)}</div><small>${unitLabel(t.units,'sold')} · ${t.transactions} transactions</small></div><div class="stat"><label>Refunds</label><div class="value">${reportMoney(t.refunds_minor)}</div><small>${unitLabel(t.returned_units,'returned or voided')}</small></div><div class="stat"><label>Average sale</label><div class="value">${reportMoney(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportSection('By business day','days',r.days)+`<div class="two-col">${reportSection('By category','categories',r.categories)}${reportSection('By cashier','cashiers',r.cashiers)}</div>`+reportSection('By product','items',productRows,productPager,'report-products')+`<p class="muted"><small>Refunds belong to the day and cashier that processed them. Categories use the label recorded when sold. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
+  $('#page').innerHTML=heading(r.event_name||'Reports','',(reportEventId?button('Current event','current-report','light','refresh'):'')+button('Clear filters','clear-filters','light','refresh')+`<a class="btn green" href="/api/reports?${reportQuery}&format=xlsx">${icon('download')}Download Excel report</a>`)+filters+`<div class="stats"><div class="stat featured"><label>Net sales ${icon('chart')}</label><div class="value">${reportMoney(t.net_minor)}</div><small>Sales less refunds in this date range</small></div><div class="stat"><label>Original sales</label><div class="value">${reportMoney(t.gross_minor)}</div><small>${unitLabel(t.units,'sold')} · ${t.transactions} transactions</small></div><div class="stat"><label>Discounts</label><div class="value">${reportMoney(t.discount_minor)}</div><small>Original sales less completed sale value</small></div><div class="stat"><label>Refunds</label><div class="value">${reportMoney(t.refunds_minor)}</div><small>${unitLabel(t.returned_units,'returned or voided')}</small></div><div class="stat"><label>Average sale</label><div class="value">${reportMoney(t.transactions?Math.round(t.sales_minor/t.transactions):0)}</div><small>Completed sale value per transaction</small></div></div>`+reportSection('By business day','days',r.days)+`<div class="two-col report-breakdowns">${reportSection('By category','categories',r.categories)}${reportSection('By cashier','cashiers',r.cashiers)}</div>`+reportSection('By product','items',productRows,productPager,'report-products')+`<p class="muted"><small>Original is the selling price before discounts; sales is after discounts. Refunds belong to the day and cashier that processed them. The Excel report includes Summary, Days, Items, Category, and Cashier sheets.</small></p>`;
+  $('#page .stats').classList.add('report-stats');
 }
 async function renderShifts(){
   const pageSize=10;
@@ -931,7 +1164,53 @@ function auditDetails(a){
   const facts=fact('Action',auditActionLabel(a.action))+fact('Record',auditRecordLabel(a))+fact('Person',a.display_name||a.attempted_username||'System')+fact('Time',timestamp(a.created_at))+(a.reason?fact('Reason',a.reason):'');
   modal('Audit event #'+a.audit_event_id,`<div class="stack"><dl class="audit-facts">${facts}</dl>${auditTechnicalDetails(a)}</div>`);
 }
-async function renderAudit(){const {events}=await api('/audit'+(auditEventId?'?event_id='+auditEventId:''));$('#page').innerHTML=heading(auditEventId?'Archived audit: '+archiveEventName:'The details stay with you.','An append-only record of who did what, and when.',(auditEventId?button('Current event','current-audit','light','refresh'):'')+button('Refresh','refresh-page','light','refresh'))+`<div class="panel"><div class="panel-title"><h2>Audit trail</h2><span class="muted">Latest 500 events</span></div>${events.length?table(['Time','Person','Action','Record','Reason / details'],events.map(a=>`<tr><td>${e(timestamp(a.created_at))}</td><td>${e(a.display_name||a.attempted_username||'System')}</td><td>${e(auditActionLabel(a.action))}</td><td>${e(auditRecordLabel(a))}</td><td class="audit-reason">${e(a.reason||'—')}${a.after_json?`<br>${button('Details','audit-details','light small','',`data-id="${a.audit_event_id}"`)}`:''}</td></tr>`)):empty('A record from the start','Activity will appear here as your team uses the counter.')}</div>`;S.auditEvents=events;}
+async function renderAudit(){
+  const params=new URLSearchParams({page:String(auditPage)});
+  if(auditEventId)params.set('event_id',String(auditEventId));
+  const {events,total,page,page_size:pageSize}=await api('/audit?'+params);
+  auditPage=page;
+  const pages=Math.max(1,Math.ceil(total/pageSize));
+  const start=total?(page-1)*pageSize+1:0,end=Math.min(total,page*pageSize);
+  const rows=events.map(a=>`<tr><td>${e(timestamp(a.created_at))}</td><td>${e(a.display_name||a.attempted_username||'System')}</td><td>${e(auditActionLabel(a.action))}</td><td>${e(auditRecordLabel(a))}</td><td class="audit-reason"><div class="audit-reason-content"><span>${e(a.reason||'—')}</span>${a.after_json?button('Details','audit-details','light small','',`data-id="${a.audit_event_id}"`):''}</div></td></tr>`);
+  const pager=`<nav class="audit-pager" aria-label="Audit trail pages"><button type="button" class="btn light small" data-action="audit-page" data-step="-1" ${page<=1?'disabled':''}>Previous</button><span>${num(start)}–${num(end)} of ${num(total)} · Page ${page} of ${pages}</span><button type="button" class="btn light small" data-action="audit-page" data-step="1" ${page>=pages?'disabled':''}>Next</button></nav>`;
+  $('#page').innerHTML=heading(auditEventId?'Archived audit: '+archiveEventName:'The details stay with you.','An append-only record of who did what, and when.',(auditEventId?button('Current event','current-audit','light','refresh'):'')+button('Refresh','refresh-page','light','refresh'))+`<div class="panel audit-panel"><div class="panel-title"><h2>Audit trail</h2><span class="muted">${num(total)} ${total===1?'event':'events'}</span></div>${events.length?table(['Time','Person','Action','Record','Reason / details'],rows):empty('A record from the start','Activity will appear here as your team uses the counter.')}${pager}</div>`;
+  S.auditEvents=events;
+}
+function discountLogAction(action){return ({'ticket.groups_adjusted':'Discount applied','ticket.price_adjusted':'Discount applied','ticket.price_adjustment_removed':'Discount removed','ticket.price_adjustment_invalidated':'Discount invalidated','ticket.price_adjustment_cleared':'Discount cleared','ticket.discount_selected':'Rate changed','ticket.discount_cleared_by_rate':'Rate disabled; discount cleared','ticket.cancelled':'Discounted ticket canceled','ticket.cancelled_by_manager':'Manager canceled ticket','sale.completed':'Discounted sale completed'})[action]||auditActionLabel(action);}
+function discountLogDetails(entry){
+  const before=auditSnapshot(entry.before_json),after=auditSnapshot(entry.after_json);
+  const snapshot=after?.items&&after.discount_minor>0?after:before?.items?before:after?.items?after:null;
+  const fact=(label,value)=>`<div><dt>${e(label)}</dt><dd>${e(value)}</dd></div>`;
+  const facts=fact('Action',discountLogAction(entry.action))+fact('Performed by',`${entry.display_name||'Unknown'}${entry.username?` (${entry.username})`:''}`)+
+    (entry.ticket_owner_name&&entry.ticket_owner_name!==entry.display_name?fact('Ticket owner',entry.ticket_owner_name):'')+fact('Time',timestamp(entry.created_at))+
+    (entry.business_date?fact('Business day',`Day ${entry.day_number} · ${entry.business_date}`):'')+
+    (entry.terminal_name?fact('Terminal',entry.terminal_name):'')+
+    (entry.ticket_number?fact('Ticket',entry.ticket_number):'')+
+    (entry.receipt_number?fact('Receipt',entry.receipt_number):'')+
+    (entry.reason?fact('Reason',entry.reason):'');
+  const summary=snapshot?`<dl class="audit-facts discount-log-summary">${fact('Original total',money(snapshot.subtotal_minor))}${fact('Discount',money(snapshot.discount_minor))}${fact('Total to pay',money(snapshot.total_minor))}${snapshot.discount_percent_bp?fact('Rate',percentLabel(snapshot.discount_percent_bp)):''}${Number.isInteger(after?.tendered_minor)?fact('Amount tendered',money(after.tendered_minor)):''}${Number.isInteger(after?.change_minor)?fact('Change',money(after.change_minor)):''}</dl>`:'';
+  const groups=snapshot?.groups?.length?`<h3>Discount groups</h3>${table(['Group','Reason','Original','Discount','Final'],snapshot.groups.map(group=>`<tr><td>${e(group.name)}</td><td>${e(group.reason)}</td><td>${money(group.gross_minor)}</td><td>${money(group.discount_minor)}</td><td>${money(group.final_minor)}</td></tr>`))}`:'';
+  const items=snapshot?.items?.length?`<h3>Items at the time</h3>${table(['Group / item','Qty','Unit price','Original','Discount','Final'],snapshot.items.map(item=>`<tr><td>${item.group?`<small>${e(item.group)}</small>`:''}<strong>${e(item.sku)}</strong><small>${e(item.description)}</small></td><td>${num(item.quantity)}</td><td>${money(item.unit_price_minor)}</td><td>${money(item.gross_minor)}</td><td>${money(item.discount_minor)}</td><td>${money(item.final_minor)}</td></tr>`))}`:'';
+  const transition=before?.discount_minor!==undefined&&after?.discount_minor!==undefined&&before.discount_minor!==after.discount_minor?`<p class="discount-log-change">Discount changed: ${money(before.discount_minor)} → ${money(after.discount_minor)}</p>`:'';
+  modal('Discount log #'+entry.audit_event_id,`<div class="discount-log-detail"><dl class="audit-facts">${facts}</dl>${transition}${summary}${groups}${items}${snapshot?'':auditTechnicalDetails(entry)}</div>`,true);
+  $('.modal')?.classList.add('discount-log-modal');
+}
+async function renderDiscountLogs(){
+  const params=new URLSearchParams({page:String(discountLogPage)});
+  if(discountLogEventId)params.set('event_id',String(discountLogEventId));
+  const {events,total,page,page_size:pageSize}=await api('/discount-logs?'+params);
+  discountLogPage=page;S.discountLogEvents=events;
+  const pages=Math.max(1,Math.ceil(total/pageSize));
+  const first=total?(page-1)*pageSize+1:0,last=Math.min(total,page*pageSize);
+  const rows=events.map(entry=>{
+    const before=auditSnapshot(entry.before_json),after=auditSnapshot(entry.after_json);
+    const amount=before?.discount_minor!==undefined&&after?.discount_minor!==undefined&&before.discount_minor!==after.discount_minor?`${money(before.discount_minor)} → ${money(after.discount_minor)}`:money(after?.discount_minor??before?.discount_minor??0);
+    const reasons=(after?.groups?.length?after.groups:before?.groups||[]).map(group=>group.reason).filter(Boolean).join('; ')||after?.reason||before?.reason||entry.reason||'';
+    return `<tr><td>${e(timestamp(entry.created_at))}</td><td>${e(entry.display_name||'Unknown')}</td><td>${e(discountLogAction(entry.action))}</td><td>${e(entry.ticket_number||'—')}${entry.receipt_number?`<small>${e(entry.receipt_number)}</small>`:''}</td><td>${e(amount)}</td><td><span class="discount-log-reason">${e(reasons||'—')}</span>${button('View','discount-log-details','light small','',`data-id="${entry.audit_event_id}"`)}</td></tr>`;
+  });
+  const pager=`<nav class="audit-pager" aria-label="Discount log pages"><button type="button" class="btn light small" data-action="discount-log-page" data-step="-1" ${page<=1?'disabled':''}>Previous</button><span>${num(first)}–${num(last)} of ${num(total)} · Page ${page} of ${pages}</span><button type="button" class="btn light small" data-action="discount-log-page" data-step="1" ${page>=pages?'disabled':''}>Next</button></nav>`;
+  $('#page').innerHTML=heading(discountLogEventId?'Archived discount log: '+archiveEventName:'Discount log','Every price reduction and change stays linked to the account that made it.',(discountLogEventId?button('Current event','current-discount-log','light','refresh'):'')+button('Refresh','refresh-page','light','refresh'))+`<div class="panel audit-panel discount-log-panel"><div class="panel-title"><h2>Discount activity</h2><span class="muted">${num(total)} ${total===1?'entry':'entries'}</span></div>${events.length?table(['Time','Performed by','Action','Ticket / receipt','Discount','Reason / details'],rows):empty('No discount activity','Applied and changed discounts will appear here.')}${pager}</div>`;
+}
 async function renderManagement(){
   let card;
   if(S.day){
@@ -964,7 +1243,7 @@ async function renderEvents(){
     action=`<h2>Ready for a new event</h2><p>Starting an event keeps products, accounts, and settings. Stock starts at zero; a manager can then open Day 1.</p>${button('Start event','start-event','green','plus')}`;
   }
   const archived=events.filter(item=>item.status==='closed');
-  const rows=archived.map(item=>`<tr><td><strong>${e(item.event_name)}</strong></td><td>${e(item.starts_on)}${item.ends_on?' – '+e(item.ends_on):''}</td><td>${pill(item.archive_backup?'Archived':'Backup needed',item.archive_backup?'success':'warn')}</td><td class="event-actions">${button('View report','event-report','light small','chart',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}${button('Inventory','event-inventory','light small','box',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}${button('View audit','event-audit','light small','shield',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}<a class="btn light small" href="/api/reports?event_id=${item.bazaar_id}&format=xlsx">${icon('download')}Excel</a></td></tr>`);
+  const rows=archived.map(item=>`<tr><td><strong>${e(item.event_name)}</strong></td><td>${e(item.starts_on)}${item.ends_on?' – '+e(item.ends_on):''}</td><td>${pill(item.archive_backup?'Archived':'Backup needed',item.archive_backup?'success':'warn')}</td><td class="event-actions">${button('View report','event-report','light small','chart',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}${button('Inventory','event-inventory','light small','box',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}${button('View audit','event-audit','light small','shield',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}${button('Discount log','event-discount-log','light small','chart',`data-id="${item.bazaar_id}" data-name="${e(item.event_name)}"`)}<a class="btn light small" href="/api/reports?event_id=${item.bazaar_id}&format=xlsx">${icon('download')}Excel</a></td></tr>`);
   $('#page').innerHTML=heading('Events','The IT System Administrator starts and ends events. Each event keeps its own days, stock movements, sales, reports, and audit trail.')+`<section class="panel event-card"><div class="panel-body">${action}</div></section><section class="panel event-history"><div class="panel-title"><h2>Past events</h2><span class="muted">Read-only records</span></div>${rows.length?table(['Event','Dates','Archive','Reports and logs'],rows):empty('No past events yet','The finished event will appear here after it ends.')}</section>`;
 }
 function startEventModal(){
@@ -1013,8 +1292,8 @@ function managerAction(title,description,path){
 document.addEventListener('click',async ev=>{
   const target=ev.target.closest('button,[data-page]');if(!target)return;
   try{
-    if(target.dataset.page){if(S.paying)return;await cartQueue;if(target.dataset.page==='checkout')return requestCheckout();if(target.dataset.page==='reports')reportEventId=null;if(target.dataset.page==='audit')auditEventId=null;if(target.dataset.page==='inventory')inventoryEventId=null;return await navigate(target.dataset.page);}
-    if(target.dataset.productPage){S.productPage+=target.dataset.productPage==='next'?1:-1;renderProducts();$('#product-grid').scrollTop=0;return;}
+    if(target.dataset.page){if(S.paying)return;await cartQueue;if(target.dataset.page==='checkout')return requestCheckout();if(target.dataset.page==='reports')reportEventId=null;if(target.dataset.page==='audit'){auditEventId=null;auditPage=1;}if(target.dataset.page==='discount_logs'){discountLogEventId=null;discountLogPage=1;}if(target.dataset.page==='inventory')inventoryEventId=null;return await navigate(target.dataset.page);}
+    if(target.dataset.productPage){S.productPage+=target.dataset.productPage==='next'?1:-1;S.productSelectionId=null;renderProducts();$('#product-grid').scrollTop=0;return;}
     if(target.dataset.add){await productQuantityModal(Number(target.dataset.add));return;}
     if(target.dataset.qty){try{await addProduct(Number(target.dataset.qty),Number(target.dataset.delta));}finally{$('#product-search')?.focus({preventScroll:true});}return;}
     if(target.dataset.cash){$('#amount-paid').value=(Number(target.dataset.cash)/100).toFixed(2);$('#amount-paid').dispatchEvent(new Event('input'));return;}
@@ -1023,16 +1302,19 @@ document.addEventListener('click',async ev=>{
     const actions={
       'toggle-password':()=>{const input=document.getElementById(target.getAttribute('aria-controls'));if(!input)return;const visible=input.type==='password';input.type=visible?'text':'password';target.setAttribute('aria-pressed',String(visible));target.setAttribute('aria-label',visible?'Hide password':'Show password');target.title=visible?'Hide password':'Show password';target.innerHTML=icon(visible?'eyeOff':'eye');},
       'checkout-fullscreen':openCheckoutFullscreen,'toggle-checkout-fullscreen':()=>checkoutFullscreen?leaveCheckoutFullscreen():enterCheckoutFullscreen(),'toggle-management':toggleManagement,
+      'scan-quantity':openScanQuantityModal,'clear-scan-quantity':clearScanQuantity,'check-price':openPriceCheckModal,
       'close-modal':closeModal,'boot':boot,'open-day':openDay,'open-shift':openShift,'close-shift':closeShift,'day-steps':async()=>{if(S.paying)return;await cartQueue;return navigate('management');},'pay':paymentModal,
       'go-to-events':()=>{closeModal();return navigate('events');},
       'start-event':startEventModal,'rename-event':()=>renameEventModal(target.dataset.name),'end-event':endEventModal,'retry-event-archive':retryEventArchiveModal,
       'event-report':()=>{reportEventId=id;archiveEventName=target.dataset.name;S.filters={};return navigate('reports');},
       'event-inventory':()=>{inventoryEventId=id;archiveEventName=target.dataset.name;Object.assign(inventoryFilters,{q:'',category_id:'',from:'',to:'',view:'products',product_page:1,movement_page:1});return navigate('inventory');},
-      'event-audit':()=>{auditEventId=id;archiveEventName=target.dataset.name;return navigate('audit');},
+      'event-audit':()=>{auditEventId=id;auditPage=1;archiveEventName=target.dataset.name;return navigate('audit');},
+      'event-discount-log':()=>{discountLogEventId=id;discountLogPage=1;archiveEventName=target.dataset.name;return navigate('discount_logs');},
       'current-report':()=>{reportEventId=null;S.filters={};return renderReports();},
       'current-inventory':()=>{inventoryEventId=null;return renderInventory();},
-      'current-audit':()=>{auditEventId=null;return renderAudit();},
-      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'set-cart-quantity':()=>setCartQuantityModal(id),'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'save-product-import':()=>savePendingProductImport(target),'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,
+      'current-audit':()=>{auditEventId=null;auditPage=1;return renderAudit();},
+      'current-discount-log':()=>{discountLogEventId=null;discountLogPage=1;return renderDiscountLogs();},
+      'cancel-ticket':cancelTicket,'transfer-ticket':transferTicket,'set-cart-quantity':()=>setCartQuantityModal(id),'adjust-price-from-payment':()=>priceGroupsModal(true),'remove-price-adjustment':removePriceAdjustment,'clear-preset-discount-from-payment':async()=>{await clearPresetDiscount();await paymentModal();},'new-product':()=>productForm(),'edit-product':()=>productForm(id),'bulk-upload-products':productImportForm,'save-product-import':()=>savePendingProductImport(target),'complete-product':()=>productForm(undefined,id),'new-stock':stockForm,
       'new-user':()=>userForm(),'edit-user':()=>userForm(id),'manager-close-shift':()=>managerCloseShift(id),
       'view-product-image':()=>viewProductImage(id),'view-cart-description':()=>viewCartDescription(id),'view-receipt':()=>showReceipt(id),'return-sale':()=>returnSale(id),
       'refresh-page':()=>navigate(S.page),'backup-page':()=>{backupPage+=Number(target.dataset.step);return renderBackups();},
@@ -1042,6 +1324,8 @@ document.addEventListener('click',async ev=>{
       'print-product-catalog':printProductCatalog,
       'print-product-sheet':()=>printProductSheet(target.dataset.title||'Products'),
       'transaction-page':async()=>{transactionPage=Math.max(1,transactionPage+Number(target.dataset.step));await renderTransactions();$('.transaction-panel')?.scrollIntoView({block:'start'});},
+      'audit-page':async()=>{auditPage=Math.max(1,auditPage+Number(target.dataset.step));await renderAudit();$('.audit-panel')?.scrollIntoView({block:'start'});},
+      'discount-log-page':async()=>{discountLogPage=Math.max(1,discountLogPage+Number(target.dataset.step));await renderDiscountLogs();$('.discount-log-panel')?.scrollIntoView({block:'start'});},
       'report-product-page':async()=>{reportProductPage=Math.max(1,reportProductPage+Number(target.dataset.step));await renderReports();$('.report-products')?.scrollIntoView({block:'start'});},
       'open-report-graph':()=>openReportGraph(target.dataset.section),
       'inventory-view':()=>{inventoryFilters.view=target.dataset.view;return renderInventory();},
@@ -1070,7 +1354,8 @@ document.addEventListener('click',async ev=>{
           try{window.print();}catch(error){window.removeEventListener('afterprint',restoreTitle);restoreTitle();throw error;}
         }finally{target.disabled=false;}
       },
-      'audit-details':()=>{const a=S.auditEvents.find(a=>a.audit_event_id===id);if(a)auditDetails(a);}
+      'audit-details':()=>{const a=S.auditEvents.find(a=>a.audit_event_id===id);if(a)auditDetails(a);},
+      'discount-log-details':()=>{const entry=S.discountLogEvents?.find(item=>item.audit_event_id===id);if(entry)discountLogDetails(entry);}
     };
     if(actions[action])await actions[action]();
   }catch(error){toast(error.message,true);}
@@ -1088,28 +1373,38 @@ document.addEventListener('change',async ev=>{
     return;
   }
   if(ev.target.id==='checkout-category'){
-    S.category=ev.target.value;S.productPage=0;renderProducts();
+    S.category=ev.target.value;S.productPage=0;S.productSelectionId=null;renderProducts();
     $('#product-grid')?.scrollTo({top:0});$('#product-search')?.focus({preventScroll:true});
-    return;
-  }
-  if(ev.target.id==='discount-choice'){
-    const percent=Number(ev.target.value);
-    try{
-      await cartQueue;
-      requireClient(S.ticket&&!S.cartError,'Refresh the order before choosing a discount.');
-      requireClient(!localStorage.getItem(`bazaar-pending-${S.user.user_id}-${S.ticket.purchase_ticket_id}`),'Review the previous payment result before changing this order.');
-      S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id+'/discount','PUT',{version:S.ticket.version,discount_percent_bp:percent});
-      renderCart();
-    }catch(error){
-      if(error.status===409&&S.ticket)try{S.ticket=await api('/tickets/'+S.ticket.purchase_ticket_id);}catch{}
-      renderCart();toast(error.message,true);
-    }
     return;
   }
   if(ev.target.dataset.filter){S.filters[ev.target.dataset.filter]=ev.target.value;if(S.page==='transactions')transactionPage=1;await navigate(S.page);}
 });
 document.addEventListener('contextmenu',ev=>ev.preventDefault());
-document.addEventListener('keydown',ev=>{if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void leaveCheckoutFullscreen();}if(ev.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){ev.preventDefault();$('#product-search')?.focus();}if(ev.key==='Tab'&&$('.modal')){const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$$('.modal').at(-1));const first=focusables[0],last=focusables.at(-1);if(ev.shiftKey&&document.activeElement===first){ev.preventDefault();last.focus();}else if(!ev.shiftKey&&document.activeElement===last){ev.preventDefault();first.focus();}}});
+document.addEventListener('keydown',ev=>{
+  const active=document.activeElement,search=$('#product-search');
+  const editing=['INPUT','TEXTAREA','SELECT'].includes(active?.tagName)||active?.isContentEditable;
+  if(ev.key==='F1'&&S.page==='checkout'&&!ev.ctrlKey&&!ev.altKey&&!ev.metaKey){
+    ev.preventDefault();
+    if(!ev.repeat&&!$('.modal')&&!S.paying)openPriceCheckModal();
+    return;
+  }
+  if(ev.key==='F2'&&S.page==='checkout'&&!ev.ctrlKey&&!ev.altKey&&!ev.metaKey){
+    const control=$(`[data-action="${ev.shiftKey?'day-steps':'close-shift'}"]`);
+    if(control&&!control.disabled){ev.preventDefault();if(!ev.repeat&&!$('.modal')&&!S.paying)control.click();}
+    return;
+  }
+  if((ev.key==='*'||ev.code==='NumpadMultiply')&&!ev.repeat&&!ev.ctrlKey&&!ev.altKey&&!ev.metaKey&&S.page==='checkout'&&!$('.modal')&&!S.paying&&(!editing||(active===search&&!search.value.trim()))){
+    ev.preventDefault();openScanQuantityModal();return;
+  }
+  if(ev.key==='Escape'){if($('.modal'))closeModal();else if(checkoutFullscreen)void leaveCheckoutFullscreen();}
+  if(ev.key==='/'&&!editing){ev.preventDefault();search?.focus();}
+  if(ev.key==='Tab'&&$('.modal')){
+    const focusables=$$('button:not(:disabled),input:not(:disabled),select,textarea,a[href]',$$('.modal').at(-1));
+    const first=focusables[0],last=focusables.at(-1);
+    if(ev.shiftKey&&active===first){ev.preventDefault();last.focus();}
+    else if(!ev.shiftKey&&active===last){ev.preventDefault();first.focus();}
+  }
+});
 setInterval(async()=>{if(pollBusy||S.paying||document.hidden)return;pollBusy=true;try{const old=JSON.stringify([S.user?.user_id,S.day?.bazaar_day_id,S.shift?.shift_id]);const result=await refreshState();const next=JSON.stringify([result.user?.user_id,result.day?.bazaar_day_id,result.shift?.shift_id]);if(old!==next&&!$('.modal'))await boot();}catch{}finally{pollBusy=false;}},20000);
 setInterval(refreshCheckoutStock,30000);
 boot();
